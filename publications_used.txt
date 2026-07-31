@@ -1,0 +1,79 @@
+Publications used in mobility_Rt analysis
+==========================================
+
+GENERATION TIME / INFECTIOUSNESS PROFILES
+------------------------------------------
+1. Hart WS, Miller E, Andrews NJ, et al. (2022). Generation time of the Alpha
+   and Delta SARS-CoV-2 variants. PLoS Computational Biology.
+   DOI: 10.1371/journal.pcbi.1010354
+   Used for: overall generation time distribution (mean=5.5 days, SD=1.8 days)
+
+2. Cereda D, Tirani M, Rovida F, et al. (2020). The early spread and epidemic
+   ignition of COVID-19 in Italy. Science, 369, 200-206.
+   DOI: 10.1126/science.abc8955
+   Used for: household (within-location) shorter serial interval component
+             (mean=4.0 days, SD=1.5 days)
+
+CONTACT RATES
+-------------
+3. Mossong J, Hens N, Jit M, et al. (2008). Social contacts and mixing patterns
+   relevant to the spread of infectious diseases. PLoS Medicine, 5(3), e74.
+   DOI: 10.1371/journal.pmed.0050074
+   Used for: baseline contact rate (13.0 contacts/day)
+
+4. Cauchemez S, Donnelly CA, Reed C, et al. (2009). Household transmission of
+   2009 pandemic influenza A (H1N1) virus in the United States. New England
+   Journal of Medicine, 361(27), 2619-2627.
+   DOI: 10.1056/NEJMoa0905498
+   Used for: between-location contact intensity scaling (30% of within-location)
+
+MOBILITY / COMMUTING
+--------------------
+5. Wesolowski A, Eagle N, Tatem AJ, et al. (2012). Quantifying the impact of
+   human mobility on malaria. Science, 338(6104), 267-270.
+   DOI: 10.1126/science.1223467
+   Used for: mobility model calibration (commuting fractions)
+
+6. Wesolowski A, et al. (2021). Impact of human mobility on the transmission
+   dynamics of infectious diseases. eLife.
+   DOI: 10.7554/eLife.66570
+   Used for: Sparse national scenario calibration (day-of-week mobility)
+
+7. Tizzoni M, Bajardi P, Decuyper A, et al. (2014). On the use of human mobility
+   proxies for modeling epidemics. PLoS Computational Biology, 10(7), e1003716.
+   DOI: 10.1371/journal.pcbi.1003716
+   Used for: Dense urban scenario mobility structure
+
+8. Azman AS, Legros D, Sack DA, et al. (2014). Micro-hotspots of risk in urban
+   cholera epidemics. Journal of Infectious Diseases, 214(5), 689-694.
+   DOI: 10.1093/infdis/jiw208
+   Used for: Urban cluster radius/hub structure parameterisation
+
+TRANSMISSION FRAMEWORK
+----------------------
+9. Fraser C (2007). Estimating individual and household reproduction numbers in
+   an emerging epidemic. PLoS ONE, 2(8), e758.
+   DOI: 10.1371/journal.pone.0000758
+   Used for: two-component infectiousness profile (household vs community)
+
+10. Diekmann O, Heesterbeek JA, Roberts MG (2010). The construction of
+    next-generation matrices for compartmental epidemic models. Journal of the
+    Royal Society Interface, 7(47), 873-885.
+    DOI: 10.1098/rsif.2009.0386
+    Used for: next-generation matrix convention (Diekmann convention)
+
+11. Ferguson NM, Cummings DA, Cauchemez S, et al. (2005). Strategies for
+    containing an emerging influenza pandemic in Southeast Asia. Nature,
+    437(7056), 209-214.
+    DOI: 10.1038/nature04017
+    Used for: between-patch mobility scaling parameter
+
+12. Keeling MJ, Rohani P (2008). Modeling Infectious Diseases in Humans and
+    Animals. Princeton University Press.
+    Used for: metapopulation model structure and parameterisation
+
+VISUALISATION
+-------------
+13. Wong B (2011). Points of view: Color blindness. Nature Methods, 8, 441.
+    DOI: 10.1038/nmeth.1618
+    Used for: Okabe-Ito colorblind-safe palette

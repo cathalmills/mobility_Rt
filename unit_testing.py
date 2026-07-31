@@ -250,87 +250,71 @@ class TestMobilityRt(unittest.TestCase):
     # -----------------------------------------------------------------------
 
     def test_gt_time_invariance(self):
-        """g_pairwise[:, k, j] varies by location pair (two-component model)."""
+        """Universal single-profile model: g_network is time-invariant and sums to 1."""
         max_days = self.max_days
         params   = self.params
+        p_aE     = self.gen_time_pmf
 
         gt_early = compute_generation_times(
             self.f_jk[self.early], self.S_series[self.early], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
         gt_peak = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
         gt_late = compute_generation_times(
             self.f_jk[self.late], self.S_series[self.late], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
 
-        N = self.N
-        # g_pairwise should differ across (k,j) pairs in two-component model
-        days_arr = np.arange(max_days)
-        means = []
-        for k in range(N):
-            for j in range(N):
-                if gt_peak["R_matrix"][k, j] > 1e-15:
-                    m = float(np.sum(days_arr * gt_peak["g_pairwise"][:, k, j]))
-                    means.append(m)
-        # At least some pairs should differ (two-component model)
-        if len(means) > 1:
-            self.assertGreater(
-                max(means) - min(means), 0.0,
-                "g_pairwise means should vary across (k,j) pairs in two-component model")
-
-        # g_network should sum to 1 at each snapshot
+        # Under the separable Eq-7 form with a shared infectiousness profile the
+        # generation time is UNIVERSAL: g_network(t,a) = p(a)/Σp for all t.
         for label, gt_snap in [("early", gt_early), ("peak", gt_peak), ("late", gt_late)]:
             self.assertAlmostEqual(
                 gt_snap["g_network"].sum(), 1.0, places=8,
                 msg=f"g_network at {label} does not sum to 1")
+        np.testing.assert_allclose(
+            gt_early["g_network"], gt_late["g_network"], atol=1e-10,
+            err_msg="g_network should be time-invariant (universal GT)")
+        np.testing.assert_allclose(
+            gt_peak["g_network"], gt_early["g_network"], atol=1e-10,
+            err_msg="g_network should be time-invariant (universal GT)")
 
     # -----------------------------------------------------------------------
     # 6. All pairwise / outward / inward GTs equal biological GT
     # -----------------------------------------------------------------------
 
     def test_gt_pairwise_equal_to_bio(self):
-        """At peak, central location has shorter mean GT than peripheral (two-component)."""
+        """All pairwise / outward / inward / network GTs equal the biological profile."""
         max_days = self.max_days
         params   = self.params
+        p_aE     = self.gen_time_pmf
+        g_bio    = p_aE / p_aE.sum()
 
         gt_peak = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
 
-        N        = self.N
-        days_arr = np.arange(max_days)
+        N = self.N
 
-        # Find central location (smallest distance to centroid) and peripheral (largest)
-        dc    = np.linalg.norm(self.coords - self.coords.mean(axis=0), axis=1)
-        i_cen = int(np.argmin(dc))
-        i_per = int(np.argmax(dc))
-
-        # Within-location GT mean: central vs peripheral
-        g_cen = gt_peak["g_pairwise"][:, i_cen, i_cen]
-        g_per = gt_peak["g_pairwise"][:, i_per, i_per]
-
-        if g_cen.sum() > 0.5 and g_per.sum() > 0.5:
-            mean_cen = float(np.sum(days_arr * g_cen))
-            mean_per = float(np.sum(days_arr * g_per))
-            # Central (lower home fraction) → more between → longer GT
-            # Peripheral (higher home fraction) → more within → shorter GT
-            self.assertGreater(
-                mean_cen, mean_per - 0.5,
-                msg=(f"Central mean GT ({mean_cen:.3f}d) should be ≥ peripheral "
-                     f"({mean_per:.3f}d) minus tolerance; central has lower home frac"))
-
-        # All pairwise GTs should sum to 1
+        # Every defined pairwise GT equals the (universal) biological profile.
         for k in range(N):
             for j in range(N):
                 if gt_peak["R_matrix"][k, j] > 1e-15:
-                    self.assertAlmostEqual(
-                        gt_peak["g_pairwise"][:, k, j].sum(), 1.0, places=8,
-                        msg=f"g_pairwise[{k},{j}] does not sum to 1")
+                    np.testing.assert_allclose(
+                        gt_peak["g_pairwise"][:, k, j], g_bio, atol=1e-10,
+                        err_msg=f"g_pairwise[{k},{j}] != biological p(a)/Σp")
+        # Outward / inward / network GTs also collapse to the same universal shape.
+        for k in range(N):
+            if gt_peak["R_matrix"].sum(axis=1)[k] > 1e-15:
+                np.testing.assert_allclose(
+                    gt_peak["g_outward"][:, k], g_bio, atol=1e-10,
+                    err_msg=f"g_outward[{k}] != biological p(a)/Σp")
+            if gt_peak["R_matrix"].sum(axis=0)[k] > 1e-15:
+                np.testing.assert_allclose(
+                    gt_peak["g_inward"][:, k], g_bio, atol=1e-10,
+                    err_msg=f"g_inward[{k}] != biological p(a)/Σp")
+        np.testing.assert_allclose(
+            gt_peak["g_network"], g_bio, atol=1e-10,
+            err_msg="g_network != biological p(a)/Σp")
 
     # -----------------------------------------------------------------------
     # 7. Euler-Lotka identity
@@ -648,17 +632,16 @@ class TestMobilityRt(unittest.TestCase):
     # 18. Peripheral locs have higher home fraction → shorter GT mean
     # -----------------------------------------------------------------------
 
-    def test_gt_peripheral_shorter_than_central(self):
-        """Peripheral locs (high home fraction) → more within-profile → shorter GT mean."""
+    def test_gt_universal_across_locations(self):
+        """GT shape is location-invariant: peripheral and central pairs share one GT."""
         max_days = self.max_days
         params   = self.params
+        p_aE     = self.gen_time_pmf
 
         gt_peak = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
 
-        days_arr = np.arange(max_days)
         dc    = np.linalg.norm(self.coords - self.coords.mean(axis=0), axis=1)
         i_cen = int(np.argmin(dc))
         i_per = int(np.argmax(dc))
@@ -666,105 +649,86 @@ class TestMobilityRt(unittest.TestCase):
         g_cen = gt_peak["g_pairwise"][:, i_cen, i_cen]
         g_per = gt_peak["g_pairwise"][:, i_per, i_per]
 
-        if g_cen.sum() > 0.5 and g_per.sum() > 0.5:
-            mean_cen = float(np.sum(days_arr * g_cen))
-            mean_per = float(np.sum(days_arr * g_per))
-            within_mean  = float(np.sum(days_arr * self.w_within))
-            between_mean = float(np.sum(days_arr * self.w_between))
-            # Both should be between within_mean and between_mean
-            self.assertGreaterEqual(mean_cen, within_mean - 0.1,
-                                    "central GT mean below within_mean")
-            self.assertLessEqual(mean_per, between_mean + 0.1,
-                                 "peripheral GT mean above between_mean")
+        # Universal-GT model: central and peripheral within-location GTs are identical.
+        np.testing.assert_allclose(
+            g_cen, g_per, atol=1e-10,
+            err_msg="within-location GT should be identical across locations (universal GT)")
 
     # -----------------------------------------------------------------------
     # 19. Weekend (high f_kk) → shorter GT mean than weekday
     # -----------------------------------------------------------------------
 
     def test_gt_weekday_vs_weekend(self):
-        """Weekend (high home fraction) → shift toward w_within → shorter GT mean."""
+        """GT shape is invariant to day-of-week mobility: Monday and Sunday coincide."""
         max_days = self.max_days
         params   = self.params
-        N = self.N
+        p_aE     = self.gen_time_pmf
 
-        # Find a weekday and weekend day: t%7==0 is Monday (scale=1.00),
-        # t%7==6 is Sunday (scale=0.50 → high home fraction)
-        t_mon = 0  # Monday
-        t_sun = 6  # Sunday
+        # Monday (t%7==0, scale=1.00) vs Sunday (t%7==6, scale=0.75, higher home fraction).
+        t_mon, t_sun = 0, 6
 
         gt_mon = compute_generation_times(
             self.f_jk[t_mon], self.S_series[t_mon], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
         gt_sun = compute_generation_times(
             self.f_jk[t_sun], self.S_series[t_sun], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
 
-        days_arr = np.arange(max_days)
-        mean_mon = float(np.sum(days_arr * gt_mon["g_network"]))
-        mean_sun = float(np.sum(days_arr * gt_sun["g_network"]))
-
-        # Sunday (more time at home) → shorter GT → mean_sun <= mean_mon
-        self.assertLessEqual(
-            mean_sun, mean_mon + 0.05,
-            msg=(f"Sunday GT mean ({mean_sun:.3f}d) should be ≤ Monday "
-                 f"({mean_mon:.3f}d); Sunday has higher home fraction"))
+        # Universal GT: mobility changes affect R magnitudes, not GT shape.
+        np.testing.assert_allclose(
+            gt_sun["g_network"], gt_mon["g_network"], atol=1e-10,
+            err_msg="g_network should not depend on day-of-week mobility (universal GT)")
 
     # -----------------------------------------------------------------------
     # 20. GT mixture is bounded between within_mean and between_mean
     # -----------------------------------------------------------------------
 
-    def test_gt_mixture_bounded(self):
-        """Pairwise GT mean is bounded between within_mean and between_mean."""
+    def test_gt_pairwise_mean_equals_bio_mean(self):
+        """Every pairwise GT mean equals the biological generation-time mean."""
         max_days = self.max_days
         params   = self.params
+        p_aE     = self.gen_time_pmf
         days_arr = np.arange(max_days)
 
-        within_mean  = float(np.sum(days_arr * self.w_within))
-        between_mean = float(np.sum(days_arr * self.w_between))
+        bio_mean = float(np.sum(days_arr * (p_aE / p_aE.sum())))
 
         gt_peak = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p_aE, max_days, self.lw, self.lb)
 
         N = self.N
         for k in range(N):
             for j in range(N):
                 if gt_peak["R_matrix"][k, j] > 1e-15:
                     m = float(np.sum(days_arr * gt_peak["g_pairwise"][:, k, j]))
-                    self.assertGreaterEqual(
-                        m, within_mean - 0.1,
-                        msg=f"g_pairwise[{k},{j}] mean {m:.3f} < within_mean {within_mean:.3f}")
-                    self.assertLessEqual(
-                        m, between_mean + 0.1,
-                        msg=f"g_pairwise[{k},{j}] mean {m:.3f} > between_mean {between_mean:.3f}")
+                    self.assertAlmostEqual(
+                        m, bio_mean, places=8,
+                        msg=f"g_pairwise[{k},{j}] mean {m:.4f} != bio mean {bio_mean:.4f}")
 
     # -----------------------------------------------------------------------
     # 21. R values are unchanged by the within/between GT split
     # -----------------------------------------------------------------------
 
-    def test_r_values_unchanged_by_gt_split(self):
-        """R_{kj} should be the same regardless of within/between split (both PMFs sum to 1)."""
+    def test_r_values_independent_of_gt_shape(self):
+        """R_{kj} depends only on the total infectiousness Σp(a), not the GT shape."""
         params   = self.params
         max_days = self.max_days
 
-        # Compute R with w_within/w_between
+        # Two infectiousness profiles with identical total mass (Σp=1) but very
+        # different shapes; R = prob_peak·S_j·base_K·Σp should be identical.
+        p1 = self.gen_time_pmf                       # Gamma-shaped, sums to 1
+        p2 = np.ones(max_days) / max_days            # uniform, also sums to 1
+
         gt1 = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
-            params["prob_transmission_peak"], self.w_within, self.w_between,
-            max_days, self.lw, self.lb)
-
-        # Compute R with a single unified GT (gen_time_pmf for both)
+            params["prob_transmission_peak"], p1, max_days, self.lw, self.lb)
         gt2 = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
-            params["prob_transmission_peak"], self.gen_time_pmf, self.gen_time_pmf,
-            max_days, self.lw, self.lb)
+            params["prob_transmission_peak"], p2, max_days, self.lw, self.lb)
 
         np.testing.assert_allclose(
             gt1["R_matrix"], gt2["R_matrix"], atol=1e-10,
-            err_msg="R_matrix differs between two-component and single-component GT")
+            err_msg="R_matrix should be invariant to GT profile shape (Σp equal)")
 
     # -----------------------------------------------------------------------
     # Additional sanity: rho > 0 for non-trivial R_mat

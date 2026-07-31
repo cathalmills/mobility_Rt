@@ -1,0 +1,165 @@
+Updated figure plan
+Here is the complete figure plan incorporating the Diekmann convention corrections, the missing elements I identified, and your existing structure.
+Figure 1: Schematic (already produced)
+No changes needed except ensuring the matrix notation matches the Diekmann convention in the schematic equations.
+Figure 2: Simulated data and overall outputs
+**Panel A:** Mobility matrix fjk(t)f_{jk}(t)
+fjk​(t) across space and time. Show as two tile plots: (i) the average mobility matrix fˉjk\bar{f}_{jk}
+fˉ​jk​ as a heatmap (origin on y-axis, destination on x-axis), (ii) a tile plot of fjj(t)f_{jj}(t)
+fjj​(t) (diagonal, home fraction) over time for each location, coloured to show weekday/weekend variation.
+
+Panel B: Effective populations across space and time. Two tile plots: (i) Smeff(t)=∑jfjm(t)Sj(t)S_m^{\text{eff}}(t) = \sum_j f_{jm}(t) S_j(t)
+Smeff​(t)=∑j​fjm​(t)Sj​(t) (effective susceptible population in each meeting location mm
+m), (ii) Imeff(t)=∑kfkm(t)∑sg(s)Ek(t−s)I_m^{\text{eff}}(t) = \sum_k f_{km}(t) \sum_s g(s) E^k(t-s)
+Imeff​(t)=∑k​fkm​(t)∑s​g(s)Ek(t−s) (effective infectious pressure in each meeting location). Both indexed by meeting location (y-axis) and time (x-axis). This shows where transmission opportunities concentrate.
+
+Panel C: Incidence across space and time. Tile plot of Ej(t,0)E^j(t,0)
+Ej(t,0) by location and time, plus an overlaid total incidence curve.
+
+Panel D: System-level R(t)=ρ(M(t))\mathcal{R}(t) = \rho(\mathbf{M}(t))
+R(t)=ρ(M(t)) over time. Include the R=1\mathcal{R} = 1
+R=1 threshold line. On a secondary axis, overlay the total incidence to show the relationship: R\mathcal{R}
+R crossing 1 should coincide with the incidence peak (approximately).
+
+Panel E: Elasticity of R(t)\mathcal{R}(t)
+R(t) over time with respect to mobility. For each location kk
+k, plot the total column elasticity ∑jEjk(t)\sum_j E_{jk}(t)
+∑j​Ejk​(t) over time. This shows which locations' mobility is most important for network-level growth, and how this shifts as the epidemic progresses.
+
+Figure 3: Taxonomy of reproduction numbers and generation times
+Panel A: Rkout(t)R_k^{\text{out}}(t)
+Rkout​(t) for all locations over time. Line plot, one curve per location, threshold line at 1.
+
+Panel B: Rjin(t)R_j^{\text{in}}(t)
+Rjin​(t) for all locations over time. Line plot, one curve per location, threshold line at 1. This is the quantity most comparable to independent Cori estimates.
+
+Panel C: The pairwise matrix M(t)\mathbf{M}(t)
+M(t) shown as: (i) a 3D surface plot with axes (source kk
+k, target jj
+j, time) for a representative subset of pairs, or (ii) three snapshot heatmaps at early, peak, and late time points.
+
+Panel D: Bias: independent R^j(t)\hat{R}_j(t)
+R^j​(t) vs mobility-informed Rjin(t)R_j^{\text{in}}(t)
+Rjin​(t) for 3–4 representative locations (one source, one sink, one central). Show with solid (mobility-informed) vs dashed (independent) lines. Annotate the bias direction and magnitude.
+
+Panel E: Source-sink decomposition. Bar chart of Rkout(t)−Rjin(t)R_k^{\text{out}}(t) - R_j^{\text{in}}(t)
+Rkout​(t)−Rjin​(t) (net export) by location at a snapshot time, coloured red (source) vs blue (sink). Alongside, show πwithin(t)\pi_{\text{within}}(t)
+πwithin​(t) and πbetween(t)\pi_{\text{between}}(t)
+πbetween​(t) over time.
+
+Panel F: Generation time comparison. Overlaid density plots at a snapshot time showing: the biological input gbiog_{\text{bio}}
+gbio​, the within-location gkkg_{kk}
+gkk​ for a central and peripheral location, a between-location gkjg_{kj}
+gkj​ for a close pair and a distant pair, and the network-level gsysg_{\text{sys}}
+gsys​ and eigenvector-weighted g~\tilde{g}
+g~​. Annotate the means.
+
+Figure 4: Spectral properties and transient dynamics
+Panel A: Eigenvalue spectrum of M(t=0)\mathbf{M}(t=0)
+M(t=0) in the complex plane. Annotate ρ\rho
+ρ, λ2\lambda_2
+λ2​, and the spectral gap. Draw a circle of radius ρ\rho
+ρ for reference.
+
+Panel B: Mixing ratio s(t)=∣λ2(t)∣/ρ(t)s(t) = |\lambda_2(t)| / \rho(t)
+s(t)=∣λ2​(t)∣/ρ(t) over time.
+
+Panel C: Reactivity σ(t)\sigma(t)
+σ(t) vs spectral radius ρ(t)\rho(t)
+ρ(t) over time. Shade the region where σ>1\sigma > 1
+σ>1 and ρ<1\rho < 1
+ρ<1 (transient amplification zone).
+
+Panel D: Amplification envelope A(n)A(n)
+A(n) for n=0,…,30n = 0, \ldots, 30
+n=0,…,30 generations, plotted alongside ρn\rho^n
+ρn. Show the gap between the two curves. Do this for both the symmetric and asymmetric commuting scenarios.
+
+Panel E: Dominant right eigenvector w\mathbf{w}
+w overlaid on the city map at three time points (early, peak, late). Node size proportional to wjw_j
+wj​, coloured by time point. This shows how the stable infection distribution shifts as susceptibles deplete.
+
+Panel F: Convergence diagnostic: actual spatial distribution of infections p(t)\mathbf{p}(t)
+p(t) vs the dominant eigenvector w(t)\mathbf{w}(t)
+w(t), measured by the cosine similarity cos⁡(p,w)\cos(\mathbf{p}, \mathbf{w})
+cos(p,w) over time. A value approaching 1 indicates convergence.
+
+Figure 5: Different commuting pattern (counterfactual)
+Panel A: The alternative mobility matrix (e.g., monocentric city with single-direction commuting, or a symmetric version of the original).
+Panel B: 3D Rkj(t)R_{kj}(t)
+Rkj​(t) snapshots under the alternative mobility.
+
+Panel C: Comparison of πwithin(t)\pi_{\text{within}}(t)
+πwithin​(t), s(t)s(t)
+s(t), and σ(t)\sigma(t)
+σ(t) between the two commuting patterns.
+
+Panel D: Elasticity comparison: which locations matter most under each commuting pattern.
+Panel E: Intervention counterfactuals: for the same total budget of mobility reduction, compare: (i) homogeneous, (ii) targeted at top-3 by column elasticity, (iii) targeted at top-3 by RkoutR_k^{\text{out}}
+Rkout​, (iv) targeted at top-3 by RlmeetingR_l^{\text{meeting}}
+Rlmeeting​. Show resulting R(t)\mathcal{R}(t)
+R(t) trajectories and total epidemic sizes.
+
+Figure 6 (new): Meeting-location analysis
+Panel A: Rlmeeting(t)R_l^{\text{meeting}}(t)
+Rlmeeting​(t) by meeting location over time. Highlight the top-3 meeting locations.
+
+Panel B: Comparison of residence-based RjinR_j^{\text{in}}
+Rjin​ ranking vs meeting-location RlmeetingR_l^{\text{meeting}}
+Rlmeeting​ ranking. Scatter plot with locations labelled, showing that the most important locations for intervention differ depending on whether you target residences or meeting locations.
+
+Panel C: Counterfactual: close the top-kk
+k meeting locations (set fjl=0f_{jl} = 0
+fjl​=0 for all jj
+j for those ll
+l, redistribute to home) and show the effect on R(t)\mathcal{R}(t)
+R(t).
+
+Figure 7 (new): Growth rate and generation time dynamics
+Panel A: The Euler-Lotka-derived growth rate r(t)r(t)
+r(t) from R(t)\mathcal{R}(t)
+R(t) and g~(t)\tilde{g}(t)
+g~​(t), compared to the empirical growth rate r^(t)=d(ln⁡∑jEj)/dt\hat{r}(t) = d(\ln \sum_j E^j) / dt
+r^(t)=d(ln∑j​Ej)/dt.
+
+Panel B: Mean generation time over time for each distribution type: biological, within-location, outward, inward, network-level, eigenvector-weighted. Line plot showing how they diverge.
+Panel C: Mean spatial generation distance dˉ(t)\bar{d}(t)
+dˉ(t) and epidemic spatial speed v(t)=dˉ(t)/gˉ(t)v(t) = \bar{d}(t) / \bar{g}(t)
+v(t)=dˉ(t)/gˉ​(t) over time.
+
+SI Figure 1: Sensitivity metrics
+Panel A: Full sensitivity matrix S=vwT/(vTw)\mathbf{S} = \mathbf{v}\mathbf{w}^T / (\mathbf{v}^T \mathbf{w})
+S=vwT/(vTw) as a heatmap at two time points.
+
+Panel B: Full elasticity matrix E\mathbf{E}
+E as a heatmap at two time points.
+
+Panel C: Sensitivity of ρ\rho
+ρ to individual mobility flows ∂ρ/∂fkm\partial \rho / \partial f_{km}
+∂ρ/∂fkm​.
+
+Panel D: Condition number κ(t)\kappa(t)
+κ(t) over time.
+
+SI Figure 2: Robustness to parameters
+Panel A: Vary λwithin/λbetween\lambda_{\text{within}} / \lambda_{\text{between}}
+λwithin​/λbetween​ ratio: show how R(t)\mathcal{R}(t)
+R(t), πwithin\pi_{\text{within}}
+πwithin​, and the bias change.
+
+Panel B: Vary home fraction fjjf_{jj}
+fjj​: show epidemic size and peak timing as functions of home fraction.
+
+Panel C: Vary R0R_0
+R0​: show how the spectral properties (mixing ratio, reactivity) change.
+
+Panel D: Counterfactual infectiousness profiles: early-peaking (COVID-like) vs flat (hypothetical) vs late-peaking. Show how generation time distributions and R types change.
+SI Figure 3: Controllability and intervention comparison
+Panel A: Minimum homogeneous vs heterogeneous control effort as functions of R0R_0
+R0​.
+
+Panel B: Targeting efficiency ratio (heterogeneous effort / homogeneous effort) as a function of CVout\text{CV}_{\text{out}}
+CVout​.
+
+Panel C: Intervention timing: same intervention applied at different epidemic phases. Show resulting epidemic trajectories.
+Panel D: Intervention duration: permanent vs 2-week vs 4-week. Show return time and residual effect.
