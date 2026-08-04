@@ -226,11 +226,6 @@ eigenvector/stable-distribution and sensitivity/elasticity identities, the
 Euler–Lotka relation, and the universal generation-time property (g identical
 across all location pairs, times, and day-of-week mobility).
 
----
-
-## Data & code availability
-
-All code and data are archived at <https://doi.org/10.5281/zenodo.15828898>.
 
 ## License
 
