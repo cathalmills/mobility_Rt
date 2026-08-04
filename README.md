@@ -5,6 +5,8 @@ Reference implementation for the manuscript
 > **Multi-scale measures of time-varying epidemic spread on human mobility networks**
 > Cathal Mills, Benjamin Reddy, William Hart, Robin Thompson, Kris V. Parag,
 > Moritz U. G. Kraemer, Christl A. Donnelly, Ben Lambert.
+arXiv: 
+https://doi.org/10.48550/arXiv.2607.28514
 
 The code implements our network-based modelling framework that integrates within-day
 human movement into mechanism-led renewal equations, and derives a family of
