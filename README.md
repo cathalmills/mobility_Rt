@@ -12,8 +12,7 @@ The code implements our network-based modelling framework that integrates within
 human movement into mechanism-led renewal equations, and derives a family of
 instantaneous reproduction numbers, kernels, generation-time distributions, and
 transience measures. Together, these control indicators provide targeted information in space and time at the network, location, transmission-corridor, and
-meeting-location scales. This repository contains every simulation and figure in
-the manuscript and provides a documented setup for applying the framework to new settings.
+meeting-location scales. 
 
 ---
 
@@ -43,8 +42,6 @@ the manuscript and provides a documented setup for applying the framework to new
 pip install numpy scipy matplotlib pillow jupyter
 ```
 
-All scripts must be run **from the repository root**, because they write to relative
-paths under `out_figs/`. Results are fully deterministic (fixed `SEED = 42`).
 
 ---
 
@@ -60,15 +57,12 @@ python3 mobility_Rt_workflow_corrected.py
 # 3. Unit tests
 python3 unit_testing.py
 
-# 4. Notebooks - here is where you can explore yourself :)
+# 4. Notebooks - here is where you can explore different options :)
 jupyter lab mobility_rt_demo.ipynb          # or: jupyter notebook ...
 jupyter lab mobility_rt_exploration.ipynb
 ```
 
-Running `directly_transmitted.py` prints a calibration line per scenario
-(`ρ_check` should equal the target R₀) and, for Scenario A, reproduces the
-headline numbers reported in the text: **attack rate 61.2 %, incidence peak on
-day 131**.
+
 
 ---
 
@@ -93,9 +87,9 @@ The PDE is integrated with a first-order upwind scheme on a uniform grid
 
 ## Reproducing the main-text figures
 
-**Important numbering note.** Figure 1 in the manuscript is a hand-drawn schematic for our framework. For the remaining figures, the code's internal
+**Important numbering note.** Figure 1 in the manuscript is a schematic for our framework. For the remaining figures, the code's internal
 names do **not** all match the final manuscript numbers — in particular the file
-`fig_04_spectral` is manuscript **Figure 5** (transience/importation), and
+`fig_04_spectral` is manuscript **Figure 5** (transience/importation) etc, and
 manuscript **Figure 4** (estimator bias) is the file `fig_main_bias_combined`. The
 table below maps manuscript figures to the exact commands and output files.
 
