@@ -62,8 +62,6 @@ jupyter lab mobility_rt_demo.ipynb          # or: jupyter notebook ...
 jupyter lab mobility_rt_exploration.ipynb
 ```
 
-
-
 ---
 
 ## The three scenarios
@@ -82,6 +80,13 @@ SARS-CoV-2-like generation time `Gamma(mean = 5.5 d, sd = 1.8 d)` truncated at 2
 contacts/day (POLYMOD, Mossong et al. 2008); away contact rate `λ_B = 0.30 · λ_W`.
 The PDE is integrated with a first-order upwind scheme on a uniform grid
 `Δt = Δa_E = 1 day`.
+
+The continuous generation time is converted to a daily pmf by `discretise_gamma`
+using **double-interval-censored** discretisation (the distribution of
+`floor(U + X)`, `U ~ Uniform(0,1)`), which recovers the specified mean exactly.
+This avoids the ≈ 0.5-day downward mean bias of the naïve `F(d+1) − F(d)` scheme
+(Park et al. 2024; Charniga et al. 2024), and matches the approach of the
+`primarycensored` package.
 
 ---
 

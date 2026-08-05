@@ -272,25 +272,39 @@ def validate_inputs(
 
 def discretise_gamma(mean: float, sd: float, max_days: int) -> np.ndarray:
     """
-    Discretise a Gamma(mean, sd) distribution into daily probability masses.
+    Double-interval-censored discretisation of Gamma(mean, sd) into daily masses.
 
-    Returns normalised p(a_E) for a_E = 0, 1, ..., max_days-1 days.
+    Returns normalised p(a_E) for a_E = 0, 1, ..., max_days-1 days: the pmf of the
+    daily-resolution generation interval D = floor(U + X), with X ~ Gamma and
+    U ~ Uniform(0,1) the unobserved within-day offset of the primary event.  This
+    recovers E[X] exactly and removes the ~0.5-day downward mean bias of the naive
+    scheme p[d] = F(d+1) - F(d) (= the distribution of floor(X)); see Park et al.
+    2024 and Charniga et al. 2024.  Analytic (primary-censored) form as in the
+    primarycensored package:
+
+        P(D=d) = IF(d+1) - 2·IF(d) + IF(d-1),
+        IF(x)  = ∫_0^x F(v) dv = x·F(x; a, θ) - a·θ·F(x; a+1, θ)   (0 for x <= 0).
 
     Examples
     --------
     >>> p = discretise_gamma(5.5, 1.8, 25)   # SARS-CoV-2 Alpha (Hart 2022)
-    >>> round((np.arange(25)*p).sum(), 1)
-    5.0
+    >>> float(round((np.arange(25)*p).sum(), 1))
+    5.5
     """
     if mean <= 0 or sd <= 0 or max_days < 1:
         raise ValueError("mean > 0, sd > 0, max_days >= 1 required")
     shape = (mean / sd) ** 2
     scale = sd ** 2 / mean
-    pmf = np.array([
-        _gamma_dist.cdf(d + 1, a=shape, scale=scale) -
-        _gamma_dist.cdf(d,     a=shape, scale=scale)
-        for d in range(max_days)
-    ])
+
+    def _int_F(x):  # ∫_0^x F(v) dv for Gamma(shape, scale)
+        if x <= 0:
+            return 0.0
+        return (x * _gamma_dist.cdf(x, a=shape, scale=scale)
+                - shape * scale * _gamma_dist.cdf(x, a=shape + 1, scale=scale))
+
+    pmf = np.array([_int_F(d + 1) - 2.0 * _int_F(d) + _int_F(d - 1)
+                    for d in range(max_days)])
+    pmf = np.clip(pmf, 0.0, None)
     return pmf / pmf.sum()
 
 
