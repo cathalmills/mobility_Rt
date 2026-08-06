@@ -17,9 +17,7 @@ network, location, transmission-corridor, and meeting-location scales.
 
 ## Repository layout
 
-All of the analysis code lives in the `mobility_rt` package. The mathematical core is
-kept separate from the plotting code, so the model can be imported and used without
-matplotlib installed.
+Analysis code lives in the `mobility_rt` package. 
 
 ```
 mobility_rt/
@@ -92,7 +90,7 @@ python3 make_corrected_figures.py
 # Unit tests
 python3 test_mobility_rt.py
 
-# Notebooks
+# Notebooks (just for illustration)
 jupyter lab demo.ipynb
 jupyter lab exploration.ipynb
 ```
@@ -124,7 +122,7 @@ using double-interval-censored discretisation (the distribution of `floor(U + X)
 `U ~ Uniform(0,1)`), which recovers the specified mean exactly. This avoids the
 roughly half-day downward mean bias of the naïve `F(d+1) − F(d)` scheme
 (Park et al. 2024; Charniga et al. 2024) and matches the approach of the
-`primarycensored` package.
+`primarycensored` R package.
 
 ---
 
