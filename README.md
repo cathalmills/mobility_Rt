@@ -130,7 +130,7 @@ roughly half-day downward mean bias of the naïve `F(d+1) − F(d)` scheme
 
 Figure 1 in the manuscript is a schematic and is not produced by the code. The
 internal names of the remaining figures do not all match the final manuscript
-numbers. In particular, the file `fig_04_spectral` is manuscript Figure 5
+numbers. File `fig_04_spectral` is manuscript Figure 5
 (transience/importation), and manuscript Figure 4 (estimator bias) is the file
 `fig_main_bias_combined`.
 
@@ -240,10 +240,6 @@ How the framework's outputs respond to epidemiological and network parameters:
 
 The final section is a static preview of a planned interactive dashboard.
 
-> Note: in the λ_B/λ_W and generation-time sweeps, β is held fixed (§4b–4c), so R₀
-> rises with the sweep and the early growth rate is pinned to the target doubling time
-> by construction. The in-notebook comments state this explicitly.
-
 ---
 
 ## Tests
@@ -257,8 +253,7 @@ row-stochasticity of the mobility matrices, the eigenvector and stable-distribut
 identities, the sensitivity and elasticity relations, the Euler–Lotka relation, the
 double-censored discretisation (it recovers the target mean), and the universal
 generation-time property (g is identical across all location pairs, times, and
-day-of-week mobility). `TestFrameworkCoreConsistency` checks that
-`mobility_rt.framework` and the core modules agree, so the two never drift apart.
+day-of-week mobility). 
 
 ---
 
