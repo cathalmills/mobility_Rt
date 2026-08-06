@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Comprehensive unit tests for directly_transmitted.py
+Unit tests for the mobility_rt package.
 Uses Python's built-in unittest module only.
 """
 
 import unittest
 import numpy as np
 
-from directly_transmitted import (
+from mobility_rt import (
     discretise_gamma,
     generate_city,
     generate_mobility,
@@ -21,14 +21,21 @@ from directly_transmitted import (
     compute_generation_times,
     eigenvector_weighted_gt,
     within_between_decomposition,
-    source_sink_analysis,
     reactivity,
     amplification_envelope,
     convergence_cosine,
     euler_lotka_r,
     simulate_epidemic_pde,
+    estimate_R_independent,
+    type_reproduction_number,
+    type_reproduction_numbers,
+    _compute_power_mean_spectrum,
+    R_PRIOR_SHAPE,
+    R_PRIOR_RATE,
+    R_MIN_WINDOW_INCIDENCE,
     COVID_PARAMS,
 )
+from scipy.stats import gamma as _gamma
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +294,9 @@ class TestMobilityRt(unittest.TestCase):
         max_days = self.max_days
         params   = self.params
         p_aE     = self.gen_time_pmf
-        g_bio    = p_aE / p_aE.sum()
+        # Renewal GT distribution excludes same-day (a=0) transmission and is
+        # renormalised over a ≥ 1 (matching the forward simulator / compute_R_matrix).
+        g_bio    = p_aE.copy(); g_bio[0] = 0.0; g_bio = g_bio / g_bio.sum()
 
         gt_peak = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
@@ -321,15 +330,17 @@ class TestMobilityRt(unittest.TestCase):
     # -----------------------------------------------------------------------
 
     def test_euler_lotka_identity(self):
-        """Euler-Lotka: R * sum(g(a) * exp(-r*a)) = 1."""
+        """Euler-Lotka: R * Σ_{a≥1} g(a) exp(-r*a) = 1 (a=0 excluded, renormalised)."""
         g_tilde = self.gen_time_pmf
-        days    = np.arange(len(g_tilde))
+        # euler_lotka_r solves over a ≥ 1, so check the identity with the same profile.
+        g_r  = g_tilde.copy(); g_r[0] = 0.0; g_r = g_r / g_r.sum()
+        days = np.arange(len(g_r))
 
         # rho = 2.0
         rho = 2.0
         r   = euler_lotka_r(rho, g_tilde)
         self.assertFalse(np.isnan(r), "euler_lotka_r returned nan for rho=2.0")
-        residual = rho * float(np.sum(g_tilde * np.exp(-r * days))) - 1.0
+        residual = rho * float(np.sum(g_r * np.exp(-r * days))) - 1.0
         self.assertAlmostEqual(
             residual, 0.0, places=6,
             msg=f"Euler-Lotka residual={residual:.2e} for rho=2.0")
@@ -346,7 +357,7 @@ class TestMobilityRt(unittest.TestCase):
                          "euler_lotka_r returned nan for rho=0.5")
         self.assertLess(r_low, 0.0,
                         "r should be negative for rho < 1")
-        residual_low = 0.5 * float(np.sum(g_tilde * np.exp(-r_low * days))) - 1.0
+        residual_low = 0.5 * float(np.sum(g_r * np.exp(-r_low * days))) - 1.0
         self.assertAlmostEqual(
             residual_low, 0.0, places=6,
             msg=f"Euler-Lotka residual={residual_low:.2e} for rho=0.5")
@@ -690,7 +701,9 @@ class TestMobilityRt(unittest.TestCase):
         p_aE     = self.gen_time_pmf
         days_arr = np.arange(max_days)
 
-        bio_mean = float(np.sum(days_arr * (p_aE / p_aE.sum())))
+        # GT distribution over a ≥ 1 (a=0 excluded, renormalised), as returned.
+        g_r      = p_aE.copy(); g_r[0] = 0.0; g_r = g_r / g_r.sum()
+        bio_mean = float(np.sum(days_arr * g_r))
 
         gt_peak = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
@@ -714,10 +727,11 @@ class TestMobilityRt(unittest.TestCase):
         params   = self.params
         max_days = self.max_days
 
-        # Two infectiousness profiles with identical total mass (Σp=1) but very
-        # different shapes; R = prob_peak·S_j·base_K·Σp should be identical.
-        p1 = self.gen_time_pmf                       # Gamma-shaped, sums to 1
-        p2 = np.ones(max_days) / max_days            # uniform, also sums to 1
+        # Two infectiousness profiles with identical total a≥1 mass but very
+        # different shapes; R = prob_peak·S_j·base_K·Σ_{a≥1}p should be identical.
+        # Both are zero at a=0 (same-day excluded), so Σ_{a≥1}p = 1 for each.
+        p1 = self.gen_time_pmf.copy(); p1[0] = 0.0; p1 = p1 / p1.sum()  # Gamma on a≥1
+        p2 = np.zeros(max_days); p2[1:] = 1.0 / (max_days - 1)          # uniform on a≥1
 
         gt1 = compute_generation_times(
             self.f_jk[self.peak], self.S_series[self.peak], self.pops,
@@ -744,14 +758,230 @@ class TestMobilityRt(unittest.TestCase):
             res["rho"], 0.0,
             msg="rho should be > 0 for non-trivial R_mat")
 
+    # =======================================================================
+    # Regression tests added after the 2026 review — each pins a class of bug
+    # that previously slipped through (discretisation mean, estimator prior /
+    # convolution alignment, a=0 lag, spectral identities, type-R threshold).
+    # =======================================================================
+
+    def test_discretise_gamma_recovers_continuous_mean(self):
+        """Double-censored discretisation recovers the continuous mean (would catch the
+        old floor(X) scheme that biased the mean ~0.5 d low)."""
+        for mean, sd in [(5.5, 1.8), (3.0, 1.0), (8.0, 2.5)]:
+            pmf = discretise_gamma(mean, sd, 40)
+            self.assertAlmostEqual(pmf.sum(), 1.0, places=10)
+            self.assertTrue(np.all(pmf >= 0.0))
+            disc_mean = float(np.sum(np.arange(40) * pmf))
+            self.assertAlmostEqual(
+                disc_mean, mean, delta=0.02,
+                msg=f"discrete mean {disc_mean:.3f} != continuous {mean} (discretisation bias)")
+
+    def test_discretise_gamma_matches_montecarlo(self):
+        """Analytic double-censored pmf == Monte-Carlo of floor(U+X)."""
+        rng = np.random.default_rng(0)
+        a = (5.5 / 1.8) ** 2; scale = 1.8 ** 2 / 5.5
+        X = _gamma.rvs(a, scale=scale, size=2_000_000, random_state=rng)
+        U = rng.uniform(0, 1, X.size)
+        D = np.floor(U + X).astype(int)
+        mc = np.bincount(D, minlength=25)[:25] / X.size
+        pmf = discretise_gamma(5.5, 1.8, 25)
+        np.testing.assert_allclose(pmf, mc / mc.sum(), atol=3e-3)
+
+    def test_estimator_prior_is_epiestim_default(self):
+        """Prior must be EpiEstim's default (mean 5), not mean 0.2 — this is C1.
+        Posterior at zero data equals the prior mean R_PRIOR_SHAPE/R_PRIOR_RATE."""
+        self.assertAlmostEqual(R_PRIOR_SHAPE / R_PRIOR_RATE, 5.0, places=6,
+                               msg="independent-estimator prior mean must be 5 (EpiEstim default)")
+        self.assertGreaterEqual(R_MIN_WINDOW_INCIDENCE, 1.0)
+
+    def test_estimator_lambda_matches_forward_model(self):
+        """The estimator's total-infectiousness Λ uses the SAME lag convention as the
+        forward simulator's force of infection (pins the convolution-alignment bug)."""
+        inc = self.inc                      # (T, N) from the shared fixture
+        pmf = self.gen_time_pmf
+        max_s = len(pmf)
+        # Forward-model Λ_j(t) = Σ_{a≥1} p(a) I_j(t-a)
+        T, N = inc.shape
+        lam_fwd = np.zeros((T, N))
+        for t in range(T):
+            for a in range(1, max_s):
+                if t - a >= 0:
+                    lam_fwd[t] += pmf[a] * inc[t - a]
+        # Estimator Λ over a 1-day window equals the same convolution
+        R_est = estimate_R_independent(inc, pmf, window=1)
+        # Reconstruct estimator's Λ where it reported: Λ = (R_PRIOR_SHAPE+I)/R̂ - R_PRIOR_RATE
+        t, j = self.peak, int(np.argmax(inc[self.peak]))
+        if np.isfinite(R_est[t, j]):
+            lam_est = (R_PRIOR_SHAPE + inc[t, j]) / R_est[t, j] - R_PRIOR_RATE
+            self.assertAlmostEqual(lam_est, lam_fwd[t, j], places=4,
+                                   msg="estimator Λ != forward-model Λ (lag misalignment)")
+
+    def test_estimator_recovers_constant_R(self):
+        """A constant-R renewal series is recovered to within a few % once incidence
+        is well above the prior (pins the prior mis-specification end-to-end)."""
+        pmf = self.gen_time_pmf
+        R_true = 1.5
+        T = 80
+        inc = np.zeros((T, 1)); inc[0, 0] = 50.0
+        for t in range(1, T):
+            lam = sum(pmf[a] * inc[t - a, 0] for a in range(1, len(pmf)) if t - a >= 0)
+            inc[t, 0] = R_true * lam
+        R_est = estimate_R_independent(inc, pmf, window=7)
+        late = R_est[40:70, 0]
+        late = late[np.isfinite(late)]
+        self.assertTrue(late.size > 0)
+        self.assertAlmostEqual(float(np.mean(late)), R_true, delta=0.08,
+                               msg=f"estimator recovered {np.mean(late):.3f}, expected {R_true}")
+
+    def test_R_uses_a1_support(self):
+        """compute_R_matrix integrates the GT over a≥1 (excludes a=0), matching the
+        simulator — R scales with Σ_{a≥1}p, so a profile with large p[0] gives smaller R."""
+        f_t = self.f_jk[self.peak]; S = self.S_series[self.peak]
+        base = self.gen_time_pmf
+        # profile with substantial a=0 mass but same shape on a≥1
+        p_big0 = base.copy(); p_big0[0] += 0.5; p_big0 /= p_big0.sum()
+        R1 = compute_R_matrix(f_t, S, self.pops, 0.035, base, self.lw, self.lb)
+        R2 = compute_R_matrix(f_t, S, self.pops, 0.035, p_big0, self.lw, self.lb)
+        ratio = (R2.sum() / R1.sum())
+        expected = p_big0[1:].sum() / base[1:].sum()
+        self.assertAlmostEqual(ratio, expected, places=6,
+                               msg="compute_R_matrix does not integrate over a≥1")
+
+    def test_rho_bounds_eq24(self):
+        """min_k R^k_out ≤ ρ(R) ≤ max_k R^k_out (Eq 24)."""
+        rng = np.random.default_rng(7)
+        for _ in range(20):
+            R = rng.uniform(0, 2, (6, 6))
+            rho = R_system(R)
+            R_out = R_outward(R)
+            self.assertLessEqual(R_out.min() - 1e-9, rho)
+            self.assertLessEqual(rho, R_out.max() + 1e-9)
+
+    def test_sigma_geq_rho(self):
+        """Reactivity σ = ‖R‖₂ ≥ ρ(R) for any matrix (Eq 37); strict for non-normal."""
+        rng = np.random.default_rng(11)
+        saw_strict = False
+        for _ in range(30):
+            R = rng.uniform(0, 2, (5, 5))
+            rr = reactivity(R)
+            self.assertGreaterEqual(rr["sigma"], rr["rho"] - 1e-9)
+            if rr["sigma"] > rr["rho"] + 1e-6:
+                saw_strict = True
+        self.assertTrue(saw_strict, "expected σ > ρ for some non-normal matrix")
+
+    def test_elasticity_matches_finite_difference(self):
+        """ε^{kj} = (R_{kj}/ρ) ∂ρ/∂R_{kj} matches a central finite difference."""
+        rng = np.random.default_rng(5)
+        R = rng.uniform(0.05, 1.5, (5, 5))
+        se = sensitivity_elasticity(R)
+        rho0 = R_system(R); h = 1e-6
+        for k in range(5):
+            for j in range(5):
+                Rp = R.copy(); Rp[k, j] += h
+                Rm = R.copy(); Rm[k, j] -= h
+                drho = (R_system(Rp) - R_system(Rm)) / (2 * h)
+                eps_fd = (R[k, j] / rho0) * drho
+                self.assertAlmostEqual(se["elasticity"][k, j], eps_fd, places=5,
+                                       msg=f"elasticity[{k},{j}] != finite diff")
+
+    def test_type_R_threshold_property(self):
+        """T_j > 1 ⟺ ρ(R) > 1 wherever T_j is defined (Eq 55)."""
+        rng = np.random.default_rng(13)
+        checked = 0
+        for _ in range(60):
+            R = rng.uniform(0, 0.6, (4, 4))
+            rho = R_system(R)
+            for Tj in type_reproduction_numbers(R):
+                if not np.isnan(Tj):
+                    self.assertEqual(Tj > 1.0, rho > 1.0,
+                                     msg=f"T_j={Tj:.3f} vs rho={rho:.3f} threshold mismatch")
+                    checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_power_mean_limits(self):
+        """X(0)=arithmetic mean, X(α→∞)→max of R^j_out (Eq 41 limits), X(1)=E(t)."""
+        # Well-separated values (max ratio ≥ 2) so the α→∞ limit converges fast.
+        R_out = np.array([[0.5, 1.0, 2.0],
+                          [1.0, 1.5, 3.0]])            # (T=2, N=3)
+        X = _compute_power_mean_spectrum(R_out, np.array([0.0, 1.0, 80.0]))
+        np.testing.assert_allclose(X[0], R_out.mean(axis=1), atol=1e-9)          # arith mean
+        E_t = (R_out ** 2).sum(axis=1) / R_out.sum(axis=1)
+        np.testing.assert_allclose(X[1], E_t, atol=1e-9)                          # α=1 → E(t)
+        np.testing.assert_allclose(X[2], R_out.max(axis=1), atol=1e-6)           # α→∞ → max
+        # monotone non-decreasing in α
+        Xs = _compute_power_mean_spectrum(R_out, np.array([0.0, 1.0, 2.0, 5.0]))
+        self.assertTrue(np.all(np.diff(Xs, axis=0) >= -1e-9))
+
+    def test_row_stochastic_under_stress(self):
+        """Mobility rows sum to 1 under hub amplification and commuting-fraction scaling."""
+        for N in (4, 10, 15):
+            city = generate_city(N, "lagos", seed=3)
+            _, pops, dists, types, meta = city
+            f, base = generate_mobility(N, 30, pops, dists, types, meta,
+                                        seed=3, commuting_frac_scale=1.2,
+                                        hub_attraction_power=8.0)
+            self.assertTrue(np.allclose(f.sum(axis=-1), 1.0, atol=1e-9),
+                            msg=f"rows not stochastic (N={N}, hub_power=8)")
+
+    def test_type_R_single_location(self):
+        """type_reproduction_number does not crash for N=1 (returns R_jj)."""
+        self.assertAlmostEqual(type_reproduction_number(np.array([[0.7]]), 0), 0.7, places=10)
+
+
+import mobility_rt.framework as _fw
+
+
+class TestFrameworkCoreConsistency(unittest.TestCase):
+    """Guard: MobilityRtFramework and the core must compute IDENTICAL math.
+
+    This institutionalises the single-source-of-truth: if the framework's math ever
+    drifts from the package core (the failure mode behind the earlier GT/estimator bugs),
+    one of these assertions fails.
+    """
+
+    def test_discretise_gamma_is_shared(self):
+        # deduped: the framework re-imports the core function — literally the same object.
+        self.assertIs(_fw.discretise_gamma, discretise_gamma)
+
+    def test_spectral_analysis_matches_core(self):
+        rng = np.random.default_rng(1)
+        for _ in range(10):
+            R = rng.uniform(0.05, 2.0, (6, 6))
+            c = spectral_analysis(R); f = _fw.spectral_analysis(R)
+            self.assertAlmostEqual(c["rho"], f["rho"], places=10)
+            self.assertAlmostEqual(c["lambda2"], f["lambda2"], places=10)
+            np.testing.assert_allclose(c["left_eigvec"], f["left_eigvec"], atol=1e-9)
+            np.testing.assert_allclose(c["right_eigvec"], f["right_eigvec"], atol=1e-9)
+
+    def test_estimate_R_independent_matches_core(self):
+        rng = np.random.default_rng(2)
+        inc = rng.poisson(20, (60, 4)).astype(float)
+        pmf = discretise_gamma(5.5, 1.8, 25)
+        np.testing.assert_allclose(estimate_R_independent(inc, pmf, 7),
+                                   _fw.estimate_R_independent(inc, pmf, 7),
+                                   atol=1e-9, equal_nan=True)
+
+    def test_type_R_matches_core(self):
+        rng = np.random.default_rng(3)
+        for _ in range(10):
+            R = rng.uniform(0.0, 0.5, (4, 4))
+            np.testing.assert_allclose(type_reproduction_numbers(R), _fw.type_R_all(R),
+                                       atol=1e-9, equal_nan=True)
+
+    def test_euler_lotka_matches_core(self):
+        pmf = discretise_gamma(5.5, 1.8, 25)
+        for rho in (0.7, 1.5, 2.5):
+            self.assertAlmostEqual(euler_lotka_r(rho, pmf), _fw.euler_lotka_r(rho, pmf), places=8)
+
 
 # ---------------------------------------------------------------------------
 # Summary printer
 # ---------------------------------------------------------------------------
 
 def run_with_summary():
+    import sys
     loader = unittest.TestLoader()
-    suite  = loader.loadTestsFromTestCase(TestMobilityRt)
+    suite  = loader.loadTestsFromModule(sys.modules[__name__])   # all TestCase classes
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
 

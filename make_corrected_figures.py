@@ -2,7 +2,7 @@
 """
 Corrected manuscript figure workflow for mobility-informed R(t).
 
-Imports the numerical core from directly_transmitted.py (unchanged) and
+Imports the numerical core from the mobility_rt package and
 regenerates Figure 2, 3, and 4 with:
   - manuscript-aligned notation (f^{jk} superscripts in labels);
   - fixed elasticity axis semantics + infectee marginal panel;
@@ -27,7 +27,7 @@ from matplotlib.lines import Line2D
 import matplotlib.patheffects as pe
 from matplotlib.ticker import FormatStrFormatter, FuncFormatter, LogLocator, MaxNLocator, ScalarFormatter
 
-import directly_transmitted as dt
+import mobility_rt as dt
 
 # ── publication style (Nature-friendly) ────────────────────────────────────
 
@@ -272,36 +272,6 @@ def _plot_matrix_tile(ax, Z, *, xlabels, ylabels, cbar_title, letter, cmap="Blue
     _colorbar_right(ax, im, cbar_title)
     panel_label(ax, letter)
     ax.grid(False)
-
-
-def _plot_matrix_surface(fig, gs_cell, Z, *, cbar_title, letter, cmap="viridis", zlabel=""):
-    """3D surface for matrix Z[k,j] = R^{kj} (rows infector k, cols infectee j)."""
-    ax = fig.add_subplot(gs_cell, projection="3d")
-    Nk, Nj = Z.shape
-    X, Y = np.meshgrid(np.arange(Nj), np.arange(Nk))
-    zc = np.maximum(Z, 0.0)
-    surf = ax.plot_surface(
-        X,
-        Y,
-        zc,
-        cmap=cmap,
-        linewidth=0,
-        antialiased=True,
-        alpha=0.92,
-        rstride=1,
-        cstride=1,
-    )
-    ax.set_xlabel(r"Infectee $j$", fontsize=7, labelpad=4)
-    ax.set_ylabel(r"Infector $k$", fontsize=7, labelpad=4)
-    if zlabel:
-        ax.set_zlabel(zlabel, fontsize=7, labelpad=6)
-    ax.set_xticks(range(Nj))
-    ax.set_yticks(range(Nk))
-    ax.tick_params(axis="z", pad=2)
-    _style_3d_ax(ax)
-    _colorbar_right_3d(fig, ax, surf, cbar_title)
-    _panel_label_3d(ax, letter)
-    return ax
 
 
 def _plot_time_location_tile(
@@ -880,7 +850,7 @@ def plot_fig03_taxonomy(
 # ── Figure 4 (patched layout + formatters) ─────────────────────────────────
 
 
-def plot_fig04_spectral(sim: dict, city_data: tuple, R_mat_alt_t0: np.ndarray, scenario_name: str, w_within, w_between, max_days: int, save_prefix: str):
+def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_within, w_between, max_days: int, save_prefix: str):
     """Spectral figure with wider gutter for panel A twin axis and plain ticks on D/F."""
     inc = sim["incidence"]
     R_mats = sim["R_matrices"]
@@ -1220,41 +1190,6 @@ def run_corrected_figure_suite(
             lb_s,
         )
 
-    city_B = dt.generate_city(N_LOC, scenario="zambia", seed=SEED)
-    coords_B, pops_B, dists_B, types_B, meta_B = city_B
-    f_B, _ = dt.generate_mobility(N_LOC, T, pops_B, dists_B, types_B, meta_B, seed=SEED)
-    initial_B = np.zeros(N_LOC)
-    initial_B[0] = 10
-    sim_B = dt.simulate_epidemic_pde(
-        T,
-        N_LOC,
-        pops_B,
-        f_B,
-        params["prob_transmission_peak"],
-        infect_profile,
-        max_days,
-        params["R0_target"],
-        initial_B,
-        LW,
-        LB,
-        w_within,
-        w_between,
-        birth_rate=3e-5,
-        death_rate=3e-5,
-        stochastic=False,
-        susceptible_depletion=True,
-        seed=SEED,
-    )
-    R_t0_B = dt.compute_R_matrix(
-        f_B[0],
-        pops_B,
-        pops_B,
-        params["prob_transmission_peak"],
-        infect_profile,
-        sim_B["lambda_within_scaled"],
-        sim_B["lambda_between_scaled"],
-    )
-
     pfx = os.path.join(out_dir, "fig")
     spfx = os.path.join(out_dir, "fig_SI_static")
 
@@ -1271,8 +1206,8 @@ def run_corrected_figure_suite(
     plot_fig03_taxonomy(sim_static, city_A, R_ind_s, gt_snaps_s, w_within, w_between, "Dense urban (static mobility)", spfx, surface_3d=True)
 
     print("\n─── Corrected Figure 4 ───")
-    plot_fig04_spectral(sim_A, city_A, R_t0_B, "Dense urban", w_within, w_between, max_days, pfx)
-    plot_fig04_spectral(sim_static, city_A, R_t0_B, "Dense urban (static mobility)", w_within, w_between, max_days, spfx)
+    plot_fig04_spectral(sim_A, city_A, "Dense urban", w_within, w_between, max_days, pfx)
+    plot_fig04_spectral(sim_static, city_A, "Dense urban (static mobility)", w_within, w_between, max_days, spfx)
 
     print("\nDone. Outputs in:", os.path.abspath(out_dir))
 

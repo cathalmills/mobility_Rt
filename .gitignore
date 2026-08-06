@@ -10,3 +10,6 @@ __pycache__/
 
 # OS / temp
 *.swp
+
+# Generated figure outputs (regenerate via `python3 -m mobility_rt.scripts.run_all`)
+out_figs/

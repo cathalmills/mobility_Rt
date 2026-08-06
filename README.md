@@ -5,29 +5,52 @@ Reference implementation for the manuscript
 > **Multi-scale measures of time-varying epidemic spread on human mobility networks**
 > Cathal Mills, Benjamin Reddy, William Hart, Robin Thompson, Kris V. Parag,
 > Moritz U. G. Kraemer, Christl A. Donnelly, Ben Lambert.
-arXiv: 
-https://doi.org/10.48550/arXiv.2607.28514
+> arXiv: https://doi.org/10.48550/arXiv.2607.28514
 
-The code implements our network-based modelling framework that integrates within-day
-human movement into mechanism-led renewal equations, and derives a family of
+The code implements the network-based modelling framework from the paper, which folds
+within-day human movement into mechanism-led renewal equations and derives a family of
 instantaneous reproduction numbers, kernels, generation-time distributions, and
-transience measures. Together, these control indicators provide targeted information in space and time at the network, location, transmission-corridor, and
-meeting-location scales. 
+transience measures. These indicators describe transmission in space and time at the
+network, location, transmission-corridor, and meeting-location scales.
 
 ---
 
-## Contents
+## Repository layout
+
+All of the analysis code lives in the `mobility_rt` package. The mathematical core is
+kept separate from the plotting code, so the model can be imported and used without
+matplotlib installed.
+
+```
+mobility_rt/
+    config.py             parameters (COVID_PARAMS, estimator priors, seeds)
+    geometry.py           synthetic city geometry            (generate_city)
+    mobility.py           within-day mobility matrices        (generate_mobility)
+    distributions.py      generation-time discretisation      (discretise_gamma)
+    kernel.py             transmission kernel and R^{kj} matrix
+    spectral.py           spectral radius, eigenvectors, sensitivity/elasticity
+    generation_time.py    generation-time distributions
+    type_reproduction.py  type-reproduction numbers
+    transmissibility.py   source-sink, power-mean spectrum, Euler-Lotka
+    estimators.py         naive and independent R estimators
+    simulation.py         renewal-PDE forward simulation
+    framework.py          MobilityRtFramework class used by the notebooks
+    plotting/             all figure and animation code (imports matplotlib)
+    scripts/run_all.py    runs the three scenarios and writes every figure
+```
+
+The top-level files:
 
 | File | Role |
-|------|------|
-| `directly_transmitted.py` | **Complete analysis + figure engine.** Runs the three simulation scenarios and generates all main-text figures, the full Supplementary figure set, and the animations. |
-| `mobility_Rt_workflow_corrected.py` | **Polished ("corrected") main-text figure pipeline.** Imports `directly_transmitted` and re-draws the overview, taxonomy, and spectral/transience figures as publication-quality 2-D tile heatmaps and 3-D surfaces. |
-| `mobility_rt_framework.py` | Self-contained framework module (the `MobilityRtFramework` class and helpers) used by the two notebooks. |
-| `mobility_rt_demo.ipynb` | Interactive, end-to-end walkthrough of the framework on one synthetic network. |
-| `mobility_rt_exploration.ipynb` | Parameter-exploration notebook (β↔R₀, growth-rate inversion, sensitivity surfaces). |
-| `unit_testing.py` | Unit-test suite validating the mathematical machinery. |
-| `methods_mobility_simulation.md` | Prose description of the simulation/mobility model and its parameter provenance. |
-| `out_figs/` | Generated figures (`main/`, `SI/`, `corrected/`). |
+|---|---|
+| `make_corrected_figures.py` | Redraws the main-text overview, taxonomy, and spectral figures as tile heatmaps and 3-D surfaces. |
+| `demo.ipynb` | End-to-end walkthrough of the framework on one synthetic network. |
+| `exploration.ipynb` | Parameter exploration (β↔R₀, growth-rate inversion, sensitivity surfaces). |
+| `test_mobility_rt.py` | Unit tests for the mathematical machinery. |
+
+The figures are not stored in the repository. Running either pipeline creates an
+`out_figs/` directory, with `main/`, `SI/`, and `corrected/` subfolders, and writes
+the PDFs, PNGs, and GIFs there.
 
 ---
 
@@ -38,99 +61,108 @@ meeting-location scales.
 - `pillow` — only for writing the animated GIFs
 - `jupyter` (or JupyterLab) — only for the notebooks
 
+The simplest way to set up is an editable install from the repository root, which
+pulls in the dependencies and puts the `mobility_rt` package on the import path so the
+commands below work from any directory:
+
+```bash
+pip install -e .            # add [notebooks] to also install jupyter
+```
+
+If you would rather not install anything, just install the dependencies directly and
+run the commands from the repository root:
+
 ```bash
 pip install numpy scipy matplotlib pillow jupyter
 ```
-
 
 ---
 
 ## Quick start
 
+Run these from the repository root (or from anywhere after `pip install -e .`):
+
 ```bash
-# 1. Full manuscript pipeline — all main + SI figures + animations (~5–8 min)
-python3 directly_transmitted.py
+# Full pipeline: all main + SI figures + animations (~5-8 min)
+python3 -m mobility_rt.scripts.run_all
 
-# 2. Polished "corrected" main-text figures only (~1–2 min)
-python3 mobility_Rt_workflow_corrected.py
+# Redrawn main-text figures only (~1-2 min)
+python3 make_corrected_figures.py
 
-# 3. Unit tests
-python3 unit_testing.py
+# Unit tests
+python3 test_mobility_rt.py
 
-# 4. Notebooks - here is where you can explore different options :)
-jupyter lab mobility_rt_demo.ipynb          # or: jupyter notebook ...
-jupyter lab mobility_rt_exploration.ipynb
+# Notebooks
+jupyter lab demo.ipynb
+jupyter lab exploration.ipynb
 ```
+
+After `pip install -e .` the pipeline is also available as a console command,
+`mobility-rt-run`.
 
 ---
 
 ## The three scenarios
 
-Both scripts simulate the same three synthetic networks (Methods §2.3–2.4):
+Both pipelines simulate the same three synthetic networks (Methods §2.3–2.4):
 
 | Scenario | Label in code | Network | Notes |
 |----------|---------------|---------|-------|
-| **A** | `lagos` | Dense-urban megacity (10 nodes: core / dense / suburban / peripheral) | Primary scenario. |
-| **B** | `zambia` | Sparse-national, capital-dominated hub-and-spoke | Counterfactual. |
-| **C** | hub-amplified | Scenario-A geometry with a single amplified hub (`hub_attraction_power` raised) | Non-normal, false-action-zone counterfactual. |
+| A | `lagos` | Dense-urban megacity (10 nodes: core / dense / suburban / peripheral) | Primary scenario. |
+| B | `zambia` | Sparse-national, capital-dominated hub-and-spoke | Counterfactual. |
+| C | hub-amplified | Scenario-A geometry with a single amplified hub (`hub_attraction_power` raised) | Non-normal, false-action-zone counterfactual. |
 
-Shared epidemiological parameters (`directly_transmitted.COVID_PARAMS`): a
+The shared epidemiological parameters are in `mobility_rt.COVID_PARAMS`: a
 SARS-CoV-2-like generation time `Gamma(mean = 5.5 d, sd = 1.8 d)` truncated at 25 d
 (Hart et al. 2022); `R(t=0) = R₀ = 1.5`; home contact rate `λ_W = 13.03`
 contacts/day (POLYMOD, Mossong et al. 2008); away contact rate `λ_B = 0.30 · λ_W`.
 The PDE is integrated with a first-order upwind scheme on a uniform grid
 `Δt = Δa_E = 1 day`.
 
-The continuous generation time is converted to a daily pmf by `discretise_gamma`
-using **double-interval-censored** discretisation (the distribution of
-`floor(U + X)`, `U ~ Uniform(0,1)`), which recovers the specified mean exactly.
-This avoids the ≈ 0.5-day downward mean bias of the naïve `F(d+1) − F(d)` scheme
-(Park et al. 2024; Charniga et al. 2024), and matches the approach of the
+The continuous generation time is turned into a daily pmf by `discretise_gamma`,
+using double-interval-censored discretisation (the distribution of `floor(U + X)`,
+`U ~ Uniform(0,1)`), which recovers the specified mean exactly. This avoids the
+roughly half-day downward mean bias of the naïve `F(d+1) − F(d)` scheme
+(Park et al. 2024; Charniga et al. 2024) and matches the approach of the
 `primarycensored` package.
 
 ---
 
 ## Reproducing the main-text figures
 
-**Important numbering note.** Figure 1 in the manuscript is a schematic for our framework. For the remaining figures, the code's internal
-names do **not** all match the final manuscript numbers — in particular the file
-`fig_04_spectral` is manuscript **Figure 5** (transience/importation) etc, and
-manuscript **Figure 4** (estimator bias) is the file `fig_main_bias_combined`. The
-table below maps manuscript figures to the exact commands and output files.
+Figure 1 in the manuscript is a schematic and is not produced by the code. The
+internal names of the remaining figures do not all match the final manuscript
+numbers. In particular, the file `fig_04_spectral` is manuscript Figure 5
+(transience/importation), and manuscript Figure 4 (estimator bias) is the file
+`fig_main_bias_combined`.
 
-| Manuscript figure | Content | Generated by | Output file(s) |
+The full pipeline builds the three scenarios once, computes the derived quantities,
+and then calls a sequence of `plot_*` functions, which live in `mobility_rt/plotting/`.
+The table below maps each manuscript figure to the function that draws it and the file
+it writes. Rows marked `corrected` come from `make_corrected_figures.py`.
+
+| Manuscript figure | Content | Drawn by | Output file(s) |
 |---|---|---|---|
-| **Fig 1** | Conceptual schematic | —  | — |
-| **Fig 2** | Overall mobility & epidemic dynamics (Scenario A) | `directly_transmitted.py` → `plot_fig2` | `out_figs/main/fig_02_overview.pdf` |
-| | | `mobility_Rt_workflow_corrected.py` → `plot_fig02_overview` | `out_figs/corrected/fig_02_overview.pdf` (2-D tiles) and `…_02_overview_surface.pdf` (3-D) |
-| **Fig 3** | Taxonomy of reproduction numbers & generation-time distributions | `directly_transmitted.py` → `plot_fig3` | `out_figs/main/fig_03_taxonomy.pdf` |
-| | | `mobility_Rt_workflow_corrected.py` → `plot_fig03_taxonomy` | `out_figs/corrected/fig_03_taxonomy.pdf` and `…_03_taxonomy_surface.pdf` |
-| **Fig 4** | Bias in network-level R̂ estimators (rows = Scenarios A/B/C) | `directly_transmitted.py` → `plot_main_bias_figure` | `out_figs/main/fig_main_bias_combined.pdf` |
-| **Fig 5** | Transience & importation (mixing ratio, reactivity σ, amplification envelopes, eigenvalues, condition number, within-location fraction) | `directly_transmitted.py` → `plot_fig4` | `out_figs/main/fig_04_spectral.pdf` |
-| | | `mobility_Rt_workflow_corrected.py` → `plot_fig04_spectral` | `out_figs/corrected/fig_04_spectral.pdf` |
+| Fig 1 | Conceptual schematic | — | — |
+| Fig 2 | Overall mobility & epidemic dynamics (Scenario A) | `plot_fig2` | `out_figs/main/fig_02_overview.pdf` |
+| | | `plot_fig02_overview` (corrected) | `out_figs/corrected/fig_02_overview.pdf` (2-D tiles) and `…_02_overview_surface.pdf` (3-D) |
+| Fig 3 | Taxonomy of reproduction numbers & generation-time distributions | `plot_fig3` | `out_figs/main/fig_03_taxonomy.pdf` |
+| | | `plot_fig03_taxonomy` (corrected) | `out_figs/corrected/fig_03_taxonomy.pdf` and `…_03_taxonomy_surface.pdf` |
+| Fig 4 | Bias in network-level R̂ estimators (rows = Scenarios A/B/C) | `plot_main_bias_figure` | `out_figs/main/fig_main_bias_combined.pdf` |
+| Fig 5 | Transience & importation (mixing ratio, reactivity σ, amplification envelopes, eigenvalues, condition number, within-location fraction) | `plot_fig4` | `out_figs/main/fig_04_spectral.pdf` |
+| | | `plot_fig04_spectral` (corrected) | `out_figs/corrected/fig_04_spectral.pdf` |
 
-`mobility_Rt_workflow_corrected.py` produces **only** the polished Fig 2 / Fig 3 /
-Fig 5 (spectral). Everything
-else (including the Fig 4 bias figure) comes from `directly_transmitted.py`.
-
-### How each pipeline builds a figure
-
-- **`directly_transmitted.py`** (`main()`): builds the three scenarios once
-  (`generate_city` → `generate_mobility` → `simulate_epidemic_pde`), computes the
-  derived quantities (R matrices, elasticities, spectra, generation times,
-  type-reproduction numbers, naive/independent estimators), then calls each
-  `plot_*` function in sequence, writing PDFs to `out_figs/main/` and `out_figs/SI/`.
-- **`mobility_Rt_workflow_corrected.py`** (`run_corrected_figure_suite()`):
-  re-simulates Scenario A (time-varying **and** static mobility) plus Scenario B for
-  the reference NGM, then re-draws Figs 2/3/5 with a modern tile-heatmap + 3-D-surface
-  style, writing PDFs to `out_figs/corrected/`. It also emits static-mobility
-  counterparts (`fig_SI_static_02_overview*`, `…_03_taxonomy*`, `…_04_spectral`).
+`make_corrected_figures.py` produces only the redrawn Fig 2, Fig 3, and Fig 5.
+Everything else, including the Fig 4 bias figure, comes from the full pipeline. The
+corrected script re-simulates Scenario A (time-varying and static mobility) plus
+Scenario B for the reference NGM, and also writes static-mobility counterparts
+(`fig_SI_static_02_overview*`, `…_03_taxonomy*`, `…_04_spectral`).
 
 ---
 
 ## Supplementary (SI) figures
 
-Generated by `directly_transmitted.py` into `out_figs/SI/`:
+Written by the full pipeline into `out_figs/SI/`:
 
 | Output file | Content | Function |
 |---|---|---|
@@ -152,50 +184,52 @@ Generated by `directly_transmitted.py` into `out_figs/SI/`:
 
 ### Additional outputs in `out_figs/main/`
 
-`directly_transmitted.py` also writes several analysis figures and animations that
-support the main text:
+The full pipeline also writes several analysis figures and animations that support the
+main text:
 
-- **Estimator-bias building blocks** — `plot_naive_R_comparison_suite` produces the
-  per-scheme comparison PDFs (`fig_naive_*`, `fig_aggregate_*`) for aggregate,
+- Estimator-bias building blocks. `plot_naive_R_comparison_suite` produces the
+  per-scheme comparison PDFs (`fig_naive_*`, `fig_aggregate_*`) for the aggregate,
   population-weighted, incidence-weighted, arithmetic-mean, and
-  relative-transmissibility-weighted estimators; these are summarised in the
-  combined Fig 4 (`fig_main_bias_combined.pdf`).
-- **Scenario-C transience** — `fig_scenario_C_transience.pdf` (`plot_fig_C_transience`),
-  the hub-amplified false-action-zone figure (σ > 1 while R < 1).
-- **Type-reproduction numbers** — `fig_type_heatmaps.png`, `fig_type_surfaces.png`,
+  relative-transmissibility-weighted estimators. These are summarised in the combined
+  Fig 4 (`fig_main_bias_combined.pdf`).
+- Scenario-C transience. `fig_scenario_C_transience.pdf` (`plot_fig_C_transience`), the
+  hub-amplified false-action-zone figure (σ > 1 while R < 1).
+- Type-reproduction numbers. `fig_type_heatmaps.png`, `fig_type_surfaces.png`,
   `fig_type_groups.png` (`plot_type_repro`).
-- **Risk-averse / power-mean spectrum** — `fig_power_mean_spectrum_Scenario_{A,B,C}.pdf`
+- Power-mean (risk-averse) spectrum. `fig_power_mean_spectrum_Scenario_{A,B,C}.pdf`
   (`plot_power_mean_spectrum`).
-- **Counterfactual non-normality** — `fig_counterfactual_nonnormal.pdf`.
-- **Animations (GIF)** — `fig_anim_01*_network_{incidence,cum_incidence,r_out,eigvec}.gif`,
-  `fig_anim_02_R_heatmap.gif`, `fig_anim_03_scenario_AC.gif`, `fig_anim_04_elasticity.gif`
-  (requires `pillow`).
+- Counterfactual non-normality. `fig_counterfactual_nonnormal.pdf`.
+- Animations. `fig_anim_01*_network_{incidence,cum_incidence,r_out,eigvec}.gif`,
+  `fig_anim_02_R_heatmap.gif`, `fig_anim_03_scenario_AC.gif`,
+  `fig_anim_04_elasticity.gif` (these need `pillow`).
 
 ---
 
 ## The notebooks
 
-Both notebooks depend only on `mobility_rt_framework.py` and run top-to-bottom
-without arguments.
+Both notebooks import from `mobility_rt.framework` and run top to bottom without
+arguments.
 
-### `mobility_rt_demo.ipynb` — framework walkthrough
-An end-to-end tour of every framework output on a single synthetic network, using
-the `MobilityRtFramework` class:
+### `demo.ipynb` — framework walkthrough
+
+A tour of every framework output on a single synthetic network, using the
+`MobilityRtFramework` class:
 
 1. Setup & infectiousness profile
 2. Build a synthetic mobility network
 3. Run the simulation
-4. Network-level indicators — R(t) (threshold), reactivity σ(t), risk-averse E(t)
-5. Location-level reproduction numbers — outward R^k_out(t), inward R^j_in(t)
+4. Network-level indicators: R(t) (threshold), reactivity σ(t), risk-averse E(t)
+5. Location-level reproduction numbers: outward R^k_out(t), inward R^j_in(t)
 6. Pairwise R^{kj}(t) matrix, sensitivity & elasticity (Eqs. 29–35)
-7. Generation-time distributions — demonstrates the **universal-GT** property
-8. Transience — mixing ratio, amplification envelope, condition number (§3.1.5)
+7. Generation-time distributions, showing the universal-GT property
+8. Transience: mixing ratio, amplification envelope, condition number (§3.1.5)
 9. Type-reproduction numbers T^j_type(t) (Eq. 54)
 10. Spatial source–sink analysis and minimum control effort
 11. Bias of the independent (closed-population) estimator
 12. Counterfactual on the sparse-rural network
 
-### `mobility_rt_exploration.ipynb` — parameter exploration
+### `exploration.ipynb` — parameter exploration
+
 How the framework's outputs respond to epidemiological and network parameters:
 
 1. Realistic parameter set-up
@@ -209,24 +243,28 @@ How the framework's outputs respond to epidemiological and network parameters:
 The final section is a static preview of a planned interactive dashboard.
 
 > Note: in the λ_B/λ_W and generation-time sweeps, β is held fixed (§4b–4c), so R₀
-> **rises** with the sweep and the early growth rate is pinned to the target doubling
-> time by construction — the in-notebook comments state this explicitly.
+> rises with the sweep and the early growth rate is pinned to the target doubling time
+> by construction. The in-notebook comments state this explicitly.
 
 ---
 
 ## Tests
 
 ```bash
-python3 unit_testing.py
+python3 test_mobility_rt.py
 ```
 
-The suite (22 tests) checks row-stochasticity of the mobility matrices, the
-eigenvector/stable-distribution and sensitivity/elasticity identities, the
-Euler–Lotka relation, and the universal generation-time property (g identical
-across all location pairs, times, and day-of-week mobility).
+The suite has 40 tests in two groups. `TestMobilityRt` checks the model itself: the
+row-stochasticity of the mobility matrices, the eigenvector and stable-distribution
+identities, the sensitivity and elasticity relations, the Euler–Lotka relation, the
+double-censored discretisation (it recovers the target mean), and the universal
+generation-time property (g is identical across all location pairs, times, and
+day-of-week mobility). `TestFrameworkCoreConsistency` checks that
+`mobility_rt.framework` and the core modules agree, so the two never drift apart.
 
+---
 
 ## License
 
-For the Author Accepted Manuscript, a CC BY public copyright licence applies (see
-the manuscript's copyright statement).
+For the Author Accepted Manuscript, a CC BY public copyright licence applies (see the
+manuscript's copyright statement).
