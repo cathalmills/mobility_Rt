@@ -7,6 +7,7 @@ from matplotlib.lines import Line2D
 from mobility_rt.config import OKABE_ITO
 from mobility_rt.distributions import discretise_gamma
 from mobility_rt.generation_time import compute_generation_times
+from mobility_rt.gt_spatial import forward_gt_dispersion, phase_days, realised_gt_dispersion, universal_gt
 from mobility_rt.geometry import representative_locs
 from mobility_rt.kernel import R_inward, R_outward, R_system, _kernel_base
 from mobility_rt.plotting.style import _bar3d_inc, _panel_label, _panel_label_3d
@@ -527,7 +528,7 @@ def plot_SI2(sim, city_data, f_jk, prob_peak, infect_profile, lw, lb,
 
     Panels (2×2):
       a  Total daily incidence over time
-      b  R(t) = ρ(R_mat(t)) with twin-axis incidence
+      b  R(t) = ρ(R_mat(t)) and risk-aware E(t) = Σ_j (R^j_out)²/Σ_k R^k_out
       c  R^j_out as heatmap (location × time)
       d  R^j_in as heatmap (location × time)
     """
@@ -640,7 +641,7 @@ def plot_SI_epi_params(params, w_within, w_between, gen_time_pmf, max_days,
     # ── a: GT probability density functions ───────────────────────────────
     ax = fig.add_subplot(gs[0, 0])  # row 0, col 0
     ax.plot(days, gen_time_pmf, color=OKABE_ITO[4], lw=1.6,
-            label=(f"$p(a_E)$ (mean={params['gen_time_mean']} d, "
+            label=(f"$p(a_E)$ from Gamma(mean={params['gen_time_mean']} d, "
                    f"SD={params['gen_time_sd']} d)"))
     mu_p = float(np.sum(days * gen_time_pmf))
     ax.axvline(mu_p, color=OKABE_ITO[4], lw=0.9, ls="--", alpha=0.7,
@@ -1268,12 +1269,13 @@ def plot_SI_lambda_decomposition(sim, city_data, f_jk, params,
         _kernel_base(f_pk, pops, lw_sim, lb_sim))
     prob_peak = params["prob_transmission_peak"]
 
-    # K_{kj}(a) at epidemic peak — single profile model
+    # K_{kj}(a) at epidemic peak — single profile model.
+    # Sum over a >= 1 (age 0 excluded), matching compute_R_matrix's infect_profile[1:].
     infect_profile_decomp = gen_time_pmf  # p(a_E): same profile for all pairs
     K_pk = np.zeros((max_days, N, N))
-    for a in range(max_days):
+    for a in range(1, max_days):
         K_pk[a] = prob_peak * S_pk[np.newaxis, :] * base_K_pk * infect_profile_decomp[a]
-    R_pk = K_pk.sum(axis=0)          # (N, N) — same as compute_R_matrix
+    R_pk = K_pk.sum(axis=0)          # (N, N) — exactly compute_R_matrix
 
     # within-fraction
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -1326,7 +1328,7 @@ def plot_SI_lambda_decomposition(sim, city_data, f_jk, params,
     # ─────────────────────────────────────────────────────────────────────
     ax = fig.add_subplot(gs[0, 1])
 
-    base_rate  = params["base_contact_rate"]   # 13.0 (pre-calibration)
+    base_rate  = params["base_contact_rate"]   # 13.03 (pre-calibration)
     # Determine calibration scale from sim
     scale_val  = lw_sim / base_rate
 
@@ -1426,12 +1428,13 @@ def plot_SI_lambda_decomposition(sim, city_data, f_jk, params,
                 arrowprops=dict(arrowstyle="-", color=COLS[0],
                                 lw=0.7, alpha=0.8))
     ax.set_xlabel("Infection age $a_E$ (days)")
-    ax.set_ylabel("$\\lambda^{kl}_E(a_E)$ ($\\times 10^{-5}$/day)")
+    ax.set_ylabel("$q_{\\rm peak}\\,\\lambda^{kl}_E(a_E)$ ($\\times 10^{-5}$/day)")
     ax.set_xlim(0, max_days - 1)
     ax.legend(fontsize=5.0, borderpad=0.3, labelspacing=0.15)
     ax.set_title(
-        "Combined $\\lambda^{kl}_E = \\beta^{kl}\\,p(a_E)/N^l_{\\rm eff}$\n"
-        f"at peak (day {peak_t}; median $N_{{\\rm eff}}=${N_eff_med/1e3:.1f}k)",
+        "Combined $q_{\\rm peak}\\,\\lambda^{kl}_E = q_{\\rm peak}\\,\\beta^{kl}\\,p(a_E)/N^l_{\\rm eff}$\n"
+        f"at peak (day {peak_t}; median $N_{{\\rm eff}}=${N_eff_med/1e3:.1f}k; "
+        "$q_{\\rm peak}$ = peak transmission prob.)",
         fontsize=6.5, pad=3)
     ax.text(0.97, 0.35,
             ("$\\int \\lambda^{kl}_E\\,da_E$ = per-contact\n"
@@ -1490,7 +1493,7 @@ def plot_SI_lambda_decomposition(sim, city_data, f_jk, params,
                    interpolation="nearest")
     cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cb.ax.tick_params(labelsize=5)
-    cb.set_label("Within-fraction $\\beta_{\\rm w}/(\\beta_{\\rm w}+\\beta_{\\rm b})$",
+    cb.set_label("Within fraction $bK_{\\rm w}/K^{\\rm base}$",
                  fontsize=5.5)
 
     loc_ticks = list(range(N))
@@ -2146,3 +2149,125 @@ def plot_SI_gt_spatial(sim, city_data, w_within, w_between, gen_time_pmf,
     plt.savefig(f"{save_prefix}_SI_gt_spatial.pdf", dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Saved {save_prefix}_SI_gt_spatial.pdf")
+
+
+def plot_SI_gt_heterogeneity(scenario_pairs, p_aE, max_days, save_prefix="fig"):
+    """SI Figure: the generation time under spatially heterogeneous transmissibility.
+
+    One row per geography, each comparing the homogeneous baseline with its
+    heterogeneous counterpart (A/A-het, B/B-het, C/C-het):
+
+      col 1  Forward GT at the peak.  Every (k,j) pair of the heterogeneous run is
+             drawn, together with the intrinsic p(a_E)/∫p.  They coincide: c_l and
+             m_k carry no infection-age dependence, so they cancel in g = K/R.
+      col 2  Realised (backward) GT mean per location over the epidemic window of
+             the heterogeneous run — this is what varies across space, and it does
+             so because locations are at different points of their own epidemics.
+      col 3  Across-location spread of that realised mean, homogeneous vs
+             heterogeneous, so the reader can see whether heterogeneity widens it.
+
+    scenario_pairs: list of (row_label, sim_hom, sim_het, gt_snaps_hom, gt_snaps_het),
+    where gt_snaps_* are the {"early"/"peak"/"late": compute_generation_times(...)}
+    dicts the pipeline builds for that scenario.
+    """
+    n_rows = len(scenario_pairs)
+    if n_rows == 0:
+        raise ValueError("scenario_pairs is empty; nothing to plot")
+    g_univ  = universal_gt(p_aE)
+    days    = np.arange(max_days)
+    mu_univ = float(days @ g_univ)
+
+    def _row_letter(i):
+        """Row a, b, c, ... so panel labels stay unique for any number of rows."""
+        return chr(ord("a") + i) if i < 26 else f"r{i + 1}"
+
+    # Margins in inches, converted to figure fractions, so the suptitle and the axis
+    # labels keep the same physical clearance whatever the number of rows.
+    fig_h = 3.3 * n_rows + 1.0
+    fig = plt.figure(figsize=(12.6, fig_h))
+    gs  = gridspec.GridSpec(n_rows, 3, figure=fig, hspace=0.58, wspace=0.36,
+                            left=0.06, right=0.97,
+                            top=1.0 - 0.80 / fig_h, bottom=0.62 / fig_h)
+
+    for r, (label, sim_hom, sim_het, gt_hom, gt_het) in enumerate(scenario_pairs):
+        fwd_hom = forward_gt_dispersion(gt_hom, p_aE)
+        fwd_het = forward_gt_dispersion(gt_het, p_aE)
+        rea_hom = realised_gt_dispersion(sim_hom, p_aE)
+        rea_het = realised_gt_dispersion(sim_het, p_aE, phase_days=phase_days(sim_het))
+        N = sim_het["incidence"].shape[1]
+
+        # ── col 1: forward GT, every pair of the heterogeneous run ──────────
+        ax = fig.add_subplot(gs[r, 0])
+        snap = gt_het["peak"]
+        R_pk = snap["R_matrix"]
+        drawn = 0
+        for k in range(N):
+            for j in range(N):
+                if R_pk[k, j] > 1e-15:
+                    ax.plot(days, snap["g_pairwise"][:, k, j], color=OKABE_ITO[1],
+                            lw=0.7, alpha=0.55, zorder=2)
+                    drawn += 1
+        ax.plot(days, g_univ, color="#222222", lw=1.8, ls="--", zorder=3,
+                label=r"$p(a_E)/\int p$")
+        ax.plot([], [], color=OKABE_ITO[1], lw=0.9,
+                label=rf"$g^{{kj}}$, all {drawn} pairs (het)")
+        ax.axvline(mu_univ, color="#777777", lw=0.8, ls=":", zorder=1)
+        ax.set_xlabel("Infection age $a_E$ (days)")
+        ax.set_ylabel("Probability")
+        ax.set_title(f"{label} — forward GT at peak", fontsize=8, pad=7)
+        ax.legend(fontsize=6.5, loc="upper right")
+        ax.text(0.02, 0.96,
+                f"mean {fwd_het['mean_gt']:.4f} d\n"
+                rf"$\max|g-p/\!\int\!p|$" + f" = {fwd_het['sup_deviation']:.0e}"
+                f"\n(hom: {fwd_hom['sup_deviation']:.0e})",
+                transform=ax.transAxes, fontsize=6, va="top", ha="left",
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="0.8", lw=0.5))
+        _panel_label(ax, _row_letter(r) + "1")
+
+        # ── col 2: realised GT mean per location (heterogeneous run) ────────
+        ax = fig.add_subplot(gs[r, 1])
+        win = rea_het["window"]
+        t_w = np.where(win)[0]
+        mu_j = rea_het["mean_infectee"]
+        cmap = plt.cm.viridis
+        for j in range(N):
+            y = np.where(win, mu_j[:, j], np.nan)
+            ax.plot(np.arange(len(y)), y, lw=0.9,
+                    color=cmap(j / max(N - 1, 1)), alpha=0.9)
+        ax.axhline(mu_univ, color="#222222", lw=1.3, ls="--",
+                   label=rf"intrinsic mean {mu_univ:.2f} d")
+        if t_w.size:
+            ax.set_xlim(float(t_w.min()), float(t_w.max()))
+        pk_het = phase_days(sim_het)["peak"]
+        ax.axvline(pk_het, color="#777777", lw=0.8, ls=":", label="epidemic peak")
+        ax.set_xlabel("Day $t$")
+        ax.set_ylabel("Realised GT mean (d)")
+        ax.set_title(f"{label} (het) — realised GT by location", fontsize=8, pad=7)
+        ax.legend(fontsize=6.5, loc="lower right")
+        sm = plt.cm.ScalarMappable(cmap=cmap,
+                                   norm=plt.Normalize(vmin=1, vmax=N))
+        cb = fig.colorbar(sm, ax=ax, fraction=0.036, pad=0.03)
+        cb.set_label("Location $j$", fontsize=7)
+        cb.ax.tick_params(labelsize=6)
+        _panel_label(ax, _row_letter(r) + "2")
+
+        # ── col 3: across-location spread, homogeneous vs heterogeneous ─────
+        ax = fig.add_subplot(gs[r, 2])
+        for tag, rea, col in (("homogeneous", rea_hom, OKABE_ITO[4]),
+                              ("heterogeneous", rea_het, OKABE_ITO[5])):
+            y = rea["spread"]
+            ok = ~np.isnan(y)
+            ax.plot(np.where(ok)[0], y[ok], lw=1.0, color=col,
+                    label=f"{tag} (median {rea['median_spread']:.3f} d)")
+        ax.set_xlabel("Day $t$")
+        ax.set_ylabel(r"$\max_j - \min_j$ realised GT (d)")
+        ax.set_title(f"{label} — spatial spread of realised GT", fontsize=8, pad=7)
+        ax.legend(fontsize=6.5, loc="upper right")
+        _panel_label(ax, _row_letter(r) + "3")
+
+    fig.suptitle("Forward generation time is universal with or without spatial "
+                 "heterogeneity; the realised interval is not",
+                 fontsize=10, fontweight="600", y=1.0 - 0.22 / fig_h)
+    plt.savefig(f"{save_prefix}_SI_gt_heterogeneity.pdf", dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved {save_prefix}_SI_gt_heterogeneity.pdf")

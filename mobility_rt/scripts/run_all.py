@@ -11,16 +11,22 @@ if __package__ in (None, ""):
         sys.path.insert(0, _root)
 
 import numpy as np
+from mobility_rt.combined_table import build_combined_table
 from mobility_rt.config import COVID_PARAMS
 from mobility_rt.distributions import discretise_gamma
+from mobility_rt.error_tables import build_estimator_error_tables
 from mobility_rt.estimators import estimate_R_independent
 from mobility_rt.generation_time import compute_generation_times
 from mobility_rt.geometry import generate_city
-from mobility_rt.kernel import R_inward, R_system, _kernel_base, compute_R_matrix
+from mobility_rt.gt_spatial import build_gt_spatial_table
+from mobility_rt.heterogeneity import contact_multipliers, heterogeneity_summary, infectiousness_multipliers
+from mobility_rt.kernel import R_inward, R_outward, R_system, _kernel_base, compute_R_matrix
+from mobility_rt.location_errors import build_diagnostics_table, build_location_table
 from mobility_rt.mobility import generate_mobility
 from mobility_rt.plotting.animations import _precompute_anim_data, plot_animation_R_heatmap, plot_animation_elasticity, plot_animation_network_metric, plot_animation_scenario_comparison
-from mobility_rt.plotting.figures_main import plot_counterfactual_nonnormal, plot_fig2, plot_fig3, plot_fig4, plot_fig5, plot_fig_C_transience, plot_main_bias_figure, plot_naive_R_comparison_suite, plot_power_mean_spectrum, plot_type_repro
-from mobility_rt.plotting.figures_si import plot_3d_surfaces, plot_SI0_population, plot_SI1, plot_SI2, plot_SI5_combined, plot_SI_3d_earlypeak, plot_SI_R_comparison, plot_SI_epi_params, plot_SI_gt_spatial, plot_SI_gt_varying_beta, plot_SI_lambda_decomposition, plot_SI_pde_convergence, plot_SI_sensitivity, plot_elasticity_surfaces, plot_fig7
+from mobility_rt.plotting.figures_corrected import run_corrected_figures
+from mobility_rt.plotting.figures_main import plot_counterfactual_nonnormal, plot_location_diagnostics, plot_location_discrepancy, plot_fig2, plot_fig3, plot_fig4, plot_fig5, plot_fig_C_transience, plot_estimator_error_summary, plot_main_bias_figure, plot_main_bias_variant_figures, plot_naive_R_comparison_suite, plot_power_mean_spectrum, plot_type_repro
+from mobility_rt.plotting.figures_si import plot_3d_surfaces, plot_SI0_population, plot_SI1, plot_SI2, plot_SI5_combined, plot_SI_3d_earlypeak, plot_SI_R_comparison, plot_SI_epi_params, plot_SI_gt_heterogeneity, plot_SI_gt_spatial, plot_SI_gt_varying_beta, plot_SI_lambda_decomposition, plot_SI_pde_convergence, plot_SI_sensitivity, plot_elasticity_surfaces, plot_fig7
 from mobility_rt.plotting.style import _set_pub_style
 from mobility_rt.simulation import simulate_epidemic_pde
 from mobility_rt.spectral import reactivity, spectral_analysis
@@ -56,6 +62,27 @@ def main():
     w_within  = infect_profile  # kept for plot backward-compat; now equal to p_aE
     w_between = infect_profile  # kept for plot backward-compat; now equal to p_aE
     print(f"\n  GT mean = {float(np.sum(np.arange(max_days)*gen_time_pmf)):.2f} d")
+
+    # ── GT snapshots, one helper for every scenario ───────────────────────
+    # Every scenario needs the same three snapshots (early / peak / late) built with
+    # ITS OWN calibrated lambdas and ITS OWN heterogeneity multipliers.  Deriving
+    # them here from the simulation dict means a heterogeneous scenario can never be
+    # handed the homogeneous kernel by accident, which would silently mis-state its
+    # R^{kj} and R^l_meeting (the generation-time SHAPES are universal either way).
+    def _gt_snapshots(sim, f_series, pops_s):
+        inc_s = sim["incidence"]
+        pk_s  = int(inc_s.sum(axis=1).argmax())
+        lw_s  = sim["lambda_within_scaled"]
+        lb_s  = sim["lambda_between_scaled"]
+        snaps = {}
+        for nm, day in (("early", max(1, pk_s // 3)),
+                        ("peak",  pk_s),
+                        ("late",  min(T - 1, pk_s + 30))):
+            snaps[nm] = compute_generation_times(
+                f_series[day], sim["susceptibles"][day], pops_s,
+                params["prob_transmission_peak"], w_within, max_days, lw_s, lb_s,
+                sim.get("contact_mult"), sim.get("infect_mult"))
+        return snaps
 
     # ── Scenario A: Dense urban ───────────────────────────────────────────
     print("\n─── Scenario A: Dense urban ───")
@@ -105,11 +132,55 @@ def main():
         stochastic=False, susceptible_depletion=True, seed=SEED)
     inc_As   = sim_A_static["incidence"]
     pk_As    = int(inc_As.sum(axis=1).argmax())
-    lw_As    = sim_A_static["lambda_within_scaled"]
-    lb_As    = sim_A_static["lambda_between_scaled"]
     print(f"  Total infections: {inc_As.sum():.0f}  "
           f"Peak day: {pk_As}  "
           f"Attack rate: {inc_As.sum()/pops_A.sum()*100:.1f}%")
+
+    # ── Heterogeneous-transmissibility counterparts (A-het / B-het / C-het) ──
+    # The baseline scenarios give every location the same contact rate and the same
+    # per-contact transmission probability, so ALL variation in the reproduction
+    # numbers comes from mobility geometry and susceptible depletion.  Each "-het"
+    # scenario is that same scenario with two multipliers switched on:
+    #   c[l]  contact rate at meeting location l, by settlement type
+    #   m[k]  transmission probability of an infector resident in k, lognormal
+    # Everything else (geometry, populations, mobility series, seeding, R0_target,
+    # demography, solver) is identical, so the pair isolates the effect of
+    # heterogeneous transmissibility on spatial aggregation bias.
+    # The multipliers are illustrative assumptions, not fitted values; see
+    # mobility_rt/heterogeneity.py.
+    def _run_het(tag, city, f_series, initial, lb_scen, seed_offset):
+        pops_h, types_h = city[1], city[3]
+        # seed_offset gives each scenario its own infectiousness draw, so the three
+        # heterogeneous runs are not correlated through a shared random vector.
+        c_h = contact_multipliers(types_h)
+        m_h = infectiousness_multipliers(len(pops_h), seed=SEED + seed_offset)
+        print(f"\n─── Scenario {tag}: heterogeneous contact + infectiousness ───")
+        summ = heterogeneity_summary(c_h, m_h)
+        print(f"  contact c[l]: [{summ['contact']['min']:.3f}, "
+              f"{summ['contact']['max']:.3f}]  CV={summ['contact']['cv']*100:.1f}%")
+        print(f"  infect  m[k]: [{summ['infect']['min']:.3f}, "
+              f"{summ['infect']['max']:.3f}]  CV={summ['infect']['cv']*100:.1f}%")
+        sim_h = simulate_epidemic_pde(
+            T, len(pops_h), pops_h, f_series,
+            params["prob_transmission_peak"], infect_profile, max_days,
+            params["R0_target"], initial, LW, lb_scen, w_within, w_between,
+            birth_rate=0.00003, death_rate=0.00003,
+            stochastic=False, susceptible_depletion=True, seed=SEED,
+            contact_mult=c_h, infect_mult=m_h)
+        inc_h  = sim_h["incidence"]
+        R_out_h = np.array([R_outward(sim_h["R_matrices"][t]) for t in range(T)])
+        pk_h   = int(inc_h.sum(axis=1).argmax())
+        cv_out = float(np.median([R_out_h[t].std() / R_out_h[t].mean()
+                                  for t in range(20, max(21, pk_h))]))
+        print(f"  Total infections: {inc_h.sum():.0f}  Peak day: {pk_h}  "
+              f"Attack rate: {inc_h.sum()/pops_h.sum()*100:.1f}%")
+        print(f"  Spread of R^j_out across locations (median, days 20..peak): "
+              f"{cv_out*100:.1f}%")
+        # The multipliers are stored on the returned dict as sim["contact_mult"]
+        # and sim["infect_mult"], so there is nothing else to hand back.
+        return sim_h
+
+    sim_A_het = _run_het("A-het (dense urban)", city_A, f_A, initial_A, LB, 0)
 
     # ── Scenario A-R012: Dense urban with R0=1.2 (for SI2 counterfactual) ──
     print("\n─── Scenario A-R012: Dense urban (R₀=1.2) ───")
@@ -172,27 +243,32 @@ def main():
     print(f"  Interpretation: low commuting fracs + exponential distance"
           f" decay → valid sparse-network behaviour, not a bug.")
 
+    sim_B_het = _run_het("B-het (sparse national)", city_B, f_B, initial_B, LB, 1)
+
     # ── Scenario C: Mega-hub non-normal mobility (false-action zone) ─────
     print("\n─── Scenario C: Mega-hub non-normal (false-action zone) ───")
     # Design rationale — checked analytically before full simulation:
     #
     # For σ(t) > 1 while ρ(t) < 1 (false-action zone), R_mat must be highly
-    # non-normal with strong upper-triangular structure: R[hub,sat] >> R[sat,hub].
+    # non-normal: R[sat,hub] and R[hub,sat] must be strongly asymmetric.
     #
-    # This requires f[sat,hub] >> f[hub,sat]:
+    # Hub topology + the mega-hub's susceptible pool make R[sat→hub] >> R[hub→sat]:
     #   (a) ONE mega-hub (pops_C[0]=3M) + 9 small satellites (200k each).
     #       With hub_attraction_power=8, gravity weight ∝ N^8 concentrates
     #       ALL satellite commuting at the single hub: f[sat,hub] ≈ c_sat.
     #       Hub residents barely visit satellites: f[hub,sat] ≈ 0.
-    #       → within-K term: R[hub,sat] = lw·f[sat,hub]·f[hub,hub]/N_eff[hub] (large)
-    #                        R[sat,hub] = lw·f[hub,sat]·f[sat,sat]/N_eff[sat] ≈ 0
-    #       → R_mat is near-upper-triangular: R[hub,*] large, R[sat,hub] ≈ 0.
-    #   (b) LB_C = LW × 0.3 (see below): suppresses the symmetric between-K term
-    #       (D[j,k]·D[k,j] cancels asymmetry); leaves within-K dominant.
+    #       Because R[k,j] ∝ S_j (the INFECTEE's susceptibles) and S_hub = 3M ≫
+    #       S_sat = 200k, the infectee=hub entries dominate: R[sat→hub] ≫ R[hub→sat].
+    #       The hub is a super-RECEIVER (R_in ≫ R_out; here ≈ 1.61 vs 0.36), so
+    #       R_mat has a dominant column — the source of the non-normality.
+    #   (b) LB_C = LW × 0.3 — the SAME between/within ratio as A/B (BETWEEN_FRACTION),
+    #       not a C-specific suppression. A modest lb keeps the symmetric between-K
+    #       term below the asymmetric term, but C's non-normality is driven by the
+    #       hub topology + susceptibility asymmetry in (a), NOT by this ratio.
     #   (c) Epidemic seeded at satellite node 1 (not hub) to route spread
-    #       through the hub-to-satellite channel, making the asymmetry visible.
+    #       through the satellite→hub channel, making the asymmetry visible.
     #   (d) commuting_frac_scale=1.0 (do not inflate hub's commuting, which
-    #       would reduce f[hub,hub] and weaken the within-K directional term).
+    #       would reduce f[hub,hub] and weaken the directional term).
     #
     # Verification: σ/ρ ≥ 1.5 at t=0 → false-action zone ≈ 30–50 days.
     # If σ/ρ < 1.3, a WARNING is printed so parameters can be adjusted.
@@ -234,35 +310,40 @@ def main():
     if _ratio_C < 1.3:
         print("  WARNING: σ/ρ < 1.3 — false-action zone may not be clearly visible")
 
+    # Scenario C keeps its own between-location rate LB_C and its satellite seeding.
+    sim_C_het = _run_het("C-het (hub-amplified)", city_C, f_C, initial_C, LB_C, 2)
+
     # ── Independent R estimation ───────────────────────────────────────────
     print("\n─── Independent R̂(t) estimation ───")
     R_ind_A = estimate_R_independent(inc_A, gen_time_pmf, window=7)
     R_ind_C = estimate_R_independent(inc_C, gen_time_pmf, window=7)
+    # A per-location independent estimate is NOT an estimate of that location's
+    # R^in or R^out.  Mobility mixes the infectious pressure arriving there, so it
+    # tracks the NETWORK value instead.  Printing it as a "bias" against R^in
+    # implied R^in was the target; these are discrepancies, and the network column
+    # is the small one.
     R_in_s  = np.array([R_inward(sim_A["R_matrices"][t]) for t in range(T)])
+    R_out_s = np.array([R_outward(sim_A["R_matrices"][t]) for t in range(T)])
+    rho_s   = np.array([R_system(sim_A["R_matrices"][t]) for t in range(T)])
+    print("    (discrepancies, not errors: the estimate targets none of these)")
     for j in range(min(N_LOC, 4)):
         ind_m = float(np.nanmean(R_ind_A[30:60, j]))
-        mob_m = float(np.nanmean(R_in_s[30:60, j]))
-        bias  = (ind_m - mob_m) / mob_m * 100 if mob_m > 0 else np.nan
-        print(f"    L{j+1}: Indep={ind_m:.3f}  R^in={mob_m:.3f}  Bias={bias:+.1f}%")
+        def _pc(x):
+            return (ind_m - x) / x * 100 if x > 0 else np.nan
+        print(f"    L{j+1}: Indep={ind_m:.3f}   vs rho {_pc(float(np.mean(rho_s[30:60]))):+6.1f}%"
+              f"   vs R^out {_pc(float(np.mean(R_out_s[30:60, j]))):+6.1f}%"
+              f"   vs R^in {_pc(float(np.mean(R_in_s[30:60, j]))):+6.1f}%")
 
     # ── GT snapshots ──────────────────────────────────────────────────────
     print("\n─── GT snapshots ───")
     early_A = max(1, pk_A // 3);  late_A = min(T-1, pk_A+30)
-    gt_snaps_A = {}
+    gt_snaps_A = _gt_snapshots(sim_A, f_A, pops_A)
     for nm, day in [("early", early_A), ("peak", pk_A), ("late", late_A)]:
-        gt_snaps_A[nm] = compute_generation_times(
-            f_A[day], sim_A["susceptibles"][day], pops_A,
-            params["prob_transmission_peak"], w_within, max_days, lw_A, lb_A)
         gn_mean = float(np.sum(np.arange(max_days) * gt_snaps_A[nm]["g_network"]))
         print(f"    {nm:5s} (d{day:3d}): g_network mean = {gn_mean:.4f} d")
 
     # ── GT snapshots for static scenario ─────────────────────────────────
-    early_As = max(1, pk_As // 3);  late_As = min(T-1, pk_As+30)
-    gt_snaps_As = {}
-    for nm, day in [("early", early_As), ("peak", pk_As), ("late", late_As)]:
-        gt_snaps_As[nm] = compute_generation_times(
-            f_A_static[day], sim_A_static["susceptibles"][day], pops_A,
-            params["prob_transmission_peak"], w_within, max_days, lw_As, lb_As)
+    gt_snaps_As = _gt_snapshots(sim_A_static, f_A_static, pops_A)
 
     # ── Independent R for static scenario ────────────────────────────────
     R_ind_As = estimate_R_independent(inc_As, gen_time_pmf, window=7)
@@ -316,8 +397,9 @@ def main():
                                sim_B["lambda_within_scaled"], sim_B["lambda_between_scaled"])
 
     import os
-    os.makedirs("out_figs/main", exist_ok=True)
-    os.makedirs("out_figs/SI",   exist_ok=True)
+    os.makedirs("out_figs/main",   exist_ok=True)
+    os.makedirs("out_figs/SI",     exist_ok=True)
+    os.makedirs("out_figs/tables", exist_ok=True)
     mpfx = "out_figs/main/fig"   # main figure prefix
     spfx = "out_figs/SI/fig"     # SI figure prefix
     # ── Type reproduction numbers (quick console check) ──────────────────
@@ -370,9 +452,87 @@ def main():
                                    city_A, city_B, city_C,
                                    gen_time_pmf, save_prefix=mpfx)
     print("\n─── Combined spatial aggregation bias figure ───")
-    plot_main_bias_figure(sim_A, sim_B, sim_C,
-                          city_A, city_B, city_C,
-                          gen_time_pmf, save_prefix=mpfx)
+    # The estimator suite is computed once here and reused by the seven
+    # weighting-scheme variants below (identical layout, different middle column).
+    bias_data = plot_main_bias_figure(sim_A, sim_B, sim_C,
+                                      city_A, city_B, city_C,
+                                      gen_time_pmf, save_prefix=mpfx)
+    print("\n─── Spatial aggregation bias — weighting-scheme variants (7 figures) ───")
+    plot_main_bias_variant_figures(sim_A, sim_B, sim_C,
+                                   city_A, city_B, city_C,
+                                   gen_time_pmf, save_prefix=mpfx,
+                                   all_data=bias_data)
+
+    # ── Same figures for the heterogeneous-transmissibility counterparts ──
+    # Cities (populations, node types) are unchanged, so city_A/B/C are reused;
+    # only the simulations differ.
+    print("\n─── Combined bias figures — heterogeneous scenarios (8 figures) ───")
+    het_labels = ("Dense urban (A-het)",
+                  "Sparse national (B-het)",
+                  "Hub-amplified (C-het)")
+    hpfx = f"{mpfx}_het"
+    bias_data_het = plot_main_bias_figure(sim_A_het, sim_B_het, sim_C_het,
+                                          city_A, city_B, city_C,
+                                          gen_time_pmf, save_prefix=hpfx,
+                                          labels=het_labels)
+    plot_main_bias_variant_figures(sim_A_het, sim_B_het, sim_C_het,
+                                   city_A, city_B, city_C,
+                                   gen_time_pmf, save_prefix=hpfx,
+                                   all_data=bias_data_het)
+
+    # ── Mean relative error tables (CSV + LaTeX), growth phase and full period ──
+    # One scenario list for every table and figure below, so their columns can
+    # never fall out of step; the manuscript table asserts they did not.
+    _SCEN = [("Scenario A",     sim_A,     city_A),
+             ("Scenario A-het", sim_A_het, city_A),
+             ("Scenario B",     sim_B,     city_B),
+             ("Scenario B-het", sim_B_het, city_B),
+             ("Scenario C",     sim_C,     city_C),
+             ("Scenario C-het", sim_C_het, city_C)]
+
+    print("\n─── Estimator mean-relative-error tables ───")
+    err_table, _ = build_estimator_error_tables(
+        _SCEN, gen_time_pmf, out_dir="out_figs/tables", prefix="estimator_error")
+
+    # ── Location level: what a single location's own estimate is tracking ──
+    print("\n─── Per-location discrepancy table ───")
+    loc_table, _ = build_location_table(_SCEN, gen_time_pmf,
+                                        out_dir="out_figs/tables",
+                                        prefix="location_discrepancy")
+    _LOC_TITLES = {"Scenario A":     "Dense urban (A)",
+                   "Scenario A-het": "Dense urban (A-het)",
+                   "Scenario B":     "Sparse national (B)",
+                   "Scenario B-het": "Sparse national (B-het)",
+                   "Scenario C":     "Hub-amplified (C)",
+                   "Scenario C-het": "Hub-amplified (C-het)"}
+    plot_location_discrepancy(loc_table, _LOC_TITLES, save_prefix=mpfx)
+
+    # The discrepancy table above reports distances.  This one turns them into the
+    # three questions a public health team actually has: can I rank locations, is
+    # the heterogeneity visible, does a local estimate track local growth?
+    print("\n─── Per-location diagnostics ───")
+    diag_table, _ = build_diagnostics_table(_SCEN, gen_time_pmf,
+                                            out_dir="out_figs/tables",
+                                            prefix="location_diagnostics")
+    plot_location_diagnostics(diag_table, _LOC_TITLES, save_prefix=mpfx)
+
+    # ── The single manuscript table: both halves, one set of days ─────────
+    # Assembled from the three tables already computed above, so nothing is
+    # recomputed and the numbers cannot drift from the tables they came from.
+    print("\n─── Manuscript table (network + location level) ───")
+    build_combined_table(_SCEN, gen_time_pmf, out_dir="out_figs/tables",
+                         prefix="manuscript_table",
+                         net_table=err_table, loc_table=loc_table,
+                         diag_table=diag_table)
+
+    # Visual companion to those tables: what heterogeneity does to each scheme.
+    print("\n─── Estimator error summary figure ───")
+    plot_estimator_error_summary(
+        err_table,
+        [("Scenario A", "Scenario A-het", "Dense urban (A)"),
+         ("Scenario B", "Scenario B-het", "Sparse national (B)"),
+         ("Scenario C", "Scenario C-het", "Hub-amplified (C)")],
+        save_prefix=mpfx)
     plot_3d_surfaces(sim_A, city_A, f_A, w_within, w_between, max_days,
                      params["prob_transmission_peak"], mpfx)
     plot_SI_lambda_decomposition(sim_A, city_A, f_A, params,
@@ -401,7 +561,72 @@ def main():
     plot_fig3(sim_A_static, city_A, R_ind_As, gt_snaps_As, w_within, w_between,
               "Dense urban (static mobility)", static_sfx)
     plot_fig4(sim_A_static, city_A, R_t0_B, "Dense urban (static mobility)",
-              w_within, w_between, max_days, static_sfx)
+              w_within, w_between, max_days, static_sfx, show_dow=False)
+
+    # ── Does the generation time vary across space? ───────────────────────
+    # The heterogeneous scenarios give each location its own contact rate c[l] and
+    # its own transmissibility m[k].  Neither depends on infection age, so both
+    # cancel in g_{kj} = K_{kj}/R_{kj} and the FORWARD generation time stays exactly
+    # universal; the REALISED (backward) interval does vary across space, because it
+    # reweights p(a_E) by each location's own infection-age composition.  Both halves
+    # are measured here rather than asserted.
+    print("\n─── Generation time under spatial heterogeneity ───")
+    gt_snaps_A_het = _gt_snapshots(sim_A_het, f_A,  pops_A)
+    gt_snaps_B     = _gt_snapshots(sim_B,     f_B,  pops_B)
+    gt_snaps_B_het = _gt_snapshots(sim_B_het, f_B,  pops_B)
+    gt_snaps_C     = _gt_snapshots(sim_C,     f_C,  pops_C)
+    gt_snaps_C_het = _gt_snapshots(sim_C_het, f_C,  pops_C)
+    build_gt_spatial_table(
+        [("Dense urban (A)",       sim_A,     gt_snaps_A),
+         ("Dense urban (A-het)",   sim_A_het, gt_snaps_A_het),
+         ("Sparse national (B)",   sim_B,     gt_snaps_B),
+         ("Sparse national (B-het)", sim_B_het, gt_snaps_B_het),
+         ("Hub-amplified (C)",     sim_C,     gt_snaps_C),
+         ("Hub-amplified (C-het)", sim_C_het, gt_snaps_C_het)],
+        p_aE, out_dir="out_figs/tables", prefix="gt_spatial_heterogeneity")
+    plot_SI_gt_heterogeneity(
+        [("Dense urban",     sim_A, sim_A_het, gt_snaps_A, gt_snaps_A_het),
+         ("Sparse national", sim_B, sim_B_het, gt_snaps_B, gt_snaps_B_het),
+         ("Hub-amplified",   sim_C, sim_C_het, gt_snaps_C, gt_snaps_C_het)],
+        p_aE, max_days, spfx)
+
+    # ── Corrected manuscript figures (formerly make_corrected_figures.py) ─
+    # Uses the Scenario A simulations already built above, so the corrected and
+    # main figures are guaranteed to depict the same run.  run_corrected_figures
+    # restores the pipeline's rcParams on exit.
+    print("\n─── Corrected manuscript figures ───")
+    # The alternative scenarios get exactly the treatment the static-mobility twin
+    # gets: the same corrected fig_02 / fig_03 / fig_04 panel set, from their own
+    # simulation, their own mobility series, their own independent R̂ and their own
+    # GT snapshots.  Each heterogeneous run is listed next to the baseline it is the
+    # counterpart of, so a reader comparing A with A-het, B with B-het or C with
+    # C-het is comparing two figures that differ in nothing but the multipliers.
+    # (Scenario A's own baseline set is the "fig_*" one drawn by the call below.)
+    _corrected_extras = [
+        (sim_A_het, city_A, f_A, gt_snaps_A_het, "Dense urban (A-het)",     "fig_A_het"),
+        (sim_B,     city_B, f_B, gt_snaps_B,     "Sparse national (B)",     "fig_B"),
+        (sim_B_het, city_B, f_B, gt_snaps_B_het, "Sparse national (B-het)", "fig_B_het"),
+        (sim_C,     city_C, f_C, gt_snaps_C,     "Hub-amplified (C)",       "fig_C"),
+        (sim_C_het, city_C, f_C, gt_snaps_C_het, "Hub-amplified (C-het)",   "fig_C_het"),
+    ]
+    extra_scenarios = []
+    for _sim_x, _city_x, _f_x, _gt_x, _name_x, _pfx_x in _corrected_extras:
+        extra_scenarios.append({
+            "sim":       _sim_x,
+            "city_data": _city_x,
+            "f_series":  _f_x,
+            "R_ind":     estimate_R_independent(_sim_x["incidence"],
+                                                gen_time_pmf, window=7),
+            "gt_snaps":  _gt_x,
+            "name":      _name_x,
+            "prefix":    _pfx_x,
+        })
+    run_corrected_figures(sim_A, sim_A_static, city_A, f_A, f_A_static,
+                          R_ind_A, R_ind_As, gt_snaps_A, gt_snaps_As,
+                          gen_time_pmf, w_within, w_between, max_days,
+                          scenario_name="Dense urban",
+                          out_dir="out_figs/corrected",
+                          extra_scenarios=extra_scenarios)
 
     # ── Power-mean spectrum figures (one per scenario) ────────────────────
     print("\n─── Power-mean spectrum figures ───")

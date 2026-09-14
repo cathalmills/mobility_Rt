@@ -928,11 +928,9 @@ def compute_generation_times(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Cori/EpiEstim default prior Gamma(shape=1, scale=5) → mean 5; the posterior-mean
-# denominator adds the RATE = 1/scale = 0.2 (not the scale, 5).  R̂ is reported only
-# once the windowed incidence is non-trivial (EpiEstim default ≥ 12).
-R_PRIOR_SHAPE = 1.0
-R_PRIOR_RATE  = 0.2
-R_MIN_WINDOW_INCIDENCE = 12.0
+# denominator adds the RATE = 1/scale = 0.2 (not the scale, 5).  Re-imported from the
+# package config rather than re-declared, so the two can never drift apart.
+from mobility_rt.config import R_MIN_WINDOW_CASES, R_PRIOR_RATE, R_PRIOR_SHAPE  # noqa: E402
 
 
 def estimate_R_independent(
@@ -972,7 +970,7 @@ def estimate_R_independent(
                 for a in range(1, max_s):
                     if tw - a >= 0:
                         lam += infectiousness_profile[a] * incidence[tw-a, j]
-            if lam > 1e-4 and obs >= R_MIN_WINDOW_INCIDENCE:
+            if lam > 1e-4 and obs >= R_MIN_WINDOW_CASES:
                 R_est[t, j] = (pa + obs) / (pb + lam)
     return R_est
 
@@ -1209,7 +1207,14 @@ def simulate_epidemic(
             type_r_s[t] = type_R_all(R_mat)
 
     R_pw[0] = R0_check
-    _store(0, R0_check, f0, S)
+    # S at this point is already post-seed (populations - initial_infections), but
+    # R(0) -- and therefore every quantity stored alongside it, R^l_meeting included
+    # -- is the FULLY SUSCEPTIBLE next-generation matrix: that is the state the
+    # calibration targets, rho(R(0)) = R0_target, and the state R0_check was built
+    # from.  Passing S here made R_meeting[0] the only t=0 quantity evaluated at a
+    # depleted S, inconsistent with R_pairwise[0] beside it and with the core
+    # simulator (pinned by TestFrameworkCoreConsistency.test_simulators_are_bit_identical).
+    _store(0, R0_check, f0, populations)
 
     # ── Time loop ─────────────────────────────────────────────────────────────
     for t in range(1, T):

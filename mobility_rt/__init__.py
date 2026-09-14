@@ -20,6 +20,7 @@ from mobility_rt.kernel import compute_R_meeting
 from mobility_rt.spectral import spectral_analysis
 from mobility_rt.generation_time import compute_generation_times
 from mobility_rt.generation_time import eigenvector_weighted_gt
+from mobility_rt.generation_time import realised_generation_times
 from mobility_rt.simulation import compute_effective_populations_series
 from mobility_rt.type_reproduction import type_reproduction_number
 from mobility_rt.type_reproduction import type_reproduction_numbers
@@ -27,8 +28,16 @@ from mobility_rt.type_reproduction import type_reproduction_number_group
 from mobility_rt.simulation import simulate_epidemic_pde
 from mobility_rt.config import R_PRIOR_SHAPE
 from mobility_rt.config import R_PRIOR_RATE
-from mobility_rt.config import R_MIN_WINDOW_INCIDENCE
 from mobility_rt.estimators import estimate_R_independent
+from mobility_rt.heterogeneity import contact_multipliers
+from mobility_rt.heterogeneity import infectiousness_multipliers
+from mobility_rt.heterogeneity import heterogeneity_summary
+from mobility_rt.error_tables import build_estimator_error_tables
+from mobility_rt.error_tables import compute_error_table
+from mobility_rt.gt_spatial import build_gt_spatial_table
+from mobility_rt.gt_spatial import forward_gt_dispersion
+from mobility_rt.gt_spatial import realised_gt_dispersion
+from mobility_rt.gt_spatial import universal_gt
 from mobility_rt.transmissibility import source_sink_analysis
 from mobility_rt.transmissibility import within_between_decomposition
 from mobility_rt.spectral import sensitivity_elasticity

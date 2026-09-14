@@ -4,7 +4,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
+import matplotlib.ticker as ticker
 from mobility_rt.config import OKABE_ITO
+from mobility_rt.error_tables import (ESTIMATOR_WINDOW, RHO_FLOOR, SCHEMES,
+                                      references, threshold_crossing_day)
 from mobility_rt.estimators import _compute_naive_suite
 from mobility_rt.geometry import representative_locs
 from mobility_rt.kernel import R_inward, R_outward, R_system
@@ -391,8 +394,14 @@ def plot_fig3(sim, city_data, R_independent, gt_snaps, w_within, w_between,
 
 
 def plot_fig4(sim, city_data, R_mat_alt_t0, scenario_name,
-              w_within, w_between, max_days, save_prefix="fig"):
+              w_within, w_between, max_days, save_prefix="fig", *,
+              show_dow=True):
     """Figure 4: Spectral properties.
+
+    show_dow draws panel a's day-of-week mobility scaling.  Pass False for a
+    scenario built on a time-invariant mobility series (the static-mobility twin),
+    which never applies that scaling, so drawing it would assert a weekly cycle the
+    run does not have.
 
     Panels (2×3 + full-width row):
       a  Mixing ratio s(t) = |λ_2|/ρ over time with day-of-week overlay
@@ -429,16 +438,20 @@ def plot_fig4(sim, city_data, R_mat_alt_t0, scenario_name,
     vm = mix_ts > 0
     ax.plot(np.where(vm)[0], mix_ts[vm], color=OKABE_ITO[2], lw=0.9,
             label="$s(t)$", zorder=5)
-    dow_scale = np.array([1.00, 1.00, 1.00, 1.00, 0.95, 0.90, 0.75])
-    dow_pattern = np.array([dow_scale[t % 7] for t in range(T)])
-    ax2.plot(range(T), dow_pattern, color=OKABE_ITO[0], lw=1.1, ls="--",
-             alpha=0.40, label="DoW scaling", zorder=3)
-    ax2.set_ylabel("DoW scale", color=OKABE_ITO[0], fontsize=6)
-    ax2.tick_params(axis="y", labelcolor=OKABE_ITO[0], labelsize=6,
-                    direction="out", length=3, width=0.8)
-    # Equally spaced right-hand ticks over the meaningful DoW range (0.75–1.0)
-    ax2.set_ylim(0.7, 1.0)
-    ax2.set_yticks([0.70, 0.80, 0.90, 1.00])
+    if show_dow:
+        dow_scale = np.array([1.00, 1.00, 1.00, 1.00, 0.95, 0.90, 0.75])
+        dow_pattern = np.array([dow_scale[t % 7] for t in range(T)])
+        ax2.plot(range(T), dow_pattern, color=OKABE_ITO[0], lw=1.1, ls="--",
+                 alpha=0.40, label="DoW scaling", zorder=3)
+        ax2.set_ylabel("DoW scale", color=OKABE_ITO[0], fontsize=6)
+        ax2.tick_params(axis="y", labelcolor=OKABE_ITO[0], labelsize=6,
+                        direction="out", length=3, width=0.8)
+        # Equally spaced right-hand ticks over the meaningful DoW range (0.75–1.0)
+        ax2.set_ylim(0.7, 1.0)
+        ax2.set_yticks([0.70, 0.80, 0.90, 1.00])
+    else:
+        ax2.set_yticks([])
+        ax2.spines["right"].set_visible(False)
     ax.set_xlabel("Day $t$")
     ax.set_ylabel("$s(t)=|\\lambda_2|/\\mathcal{R}$")
     ax.set_ylim(0, 1.05)
@@ -805,12 +818,11 @@ def plot_counterfactual_nonnormal(sim_A, sim_C, city_A, f_A, f_C,
     observing only satellite case counts would wrongly conclude that local
     transmission is growing and call for NPIs.
 
-    Note on spectral non-normality (σ/ρ): with realistic lw/lb = 3.33 and home
-    fractions 0.15–0.82, the between-location kernel term lb·D[j,k] is
-    symmetric by construction (D is symmetric), so σ/ρ ≈ 1.03–1.15 and the
-    spectral false-action zone (σ > 1, ρ < 1) is too narrow to plot
-    meaningfully.  The figure instead shows the estimator-bias false-action zone
-    (panel f) which is both achievable and policy-relevant.
+    Note on spectral non-normality (σ/ρ): Scenario C uses hub_attraction_power=8 and
+    lb_C = lw × 0.3, whose near-star hub topology makes the between-location kernel
+    strongly asymmetric and drives σ/ρ ≳ 1.3.  The spectral false-action zone
+    (σ > 1, ρ < 1) is therefore visible and is shown in panel c; the estimator-bias
+    false-action zone (panels e/f) is also shown, as it is policy-relevant.
 
     Layout 4 × 3:
       a  Aggregate incidence — A vs C
@@ -821,7 +833,7 @@ def plot_counterfactual_nonnormal(sim_A, sim_C, city_A, f_A, f_C,
       f  R̂^j_ind vs ρ(R) — Scenario C  (FALSE-ACTION ZONE shaded)
       g  R_kj heatmap at peak — Baseline A
       h  R_kj heatmap at peak — Hub-amplified C
-      i  Within-fraction π̄_j bar chart — A vs C
+      i  Resident-population bar chart — Scenario C (mega-hub highlighted)
       j  Overall within-fraction π̄(t) timeseries — A vs C
       k  π_j(t) heatmap — Scenario A
       l  π_j(t) heatmap — Scenario C
@@ -1275,50 +1287,148 @@ def plot_naive_R_comparison_suite(sim_A, sim_B, sim_C, city_A, city_B, city_C,
             p3, f"{save_prefix}_naive_agg_{ref_sfx}.pdf")
 
 
-def plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C,
-                          gen_time_pmf, save_prefix="fig"):
-    """Main-manuscript figure: spatial aggregation bias from two sources.
+# ── Combined spatial-aggregation-bias figure (main + variants) ────────────
+#
+# Every aggregation scheme that the middle column can display.  Each entry is
+#   (suite key, LaTeX for the estimator, middle-column title line, file suffix)
+# and the LaTeX carries no outer "$" delimiters and no trailing "(t)".
+#
+# "ind" schemes aggregate the per-location sliding-window (Cori/EpiEstim)
+# estimates R^j_ind(t); "out" schemes aggregate the model's outward
+# reproduction numbers R^j_out(t) = Σ_k R_{jk}(t).  "agg" instead applies the
+# sliding-window estimator once to the network-total incidence.
+_MAIN_BIAS_VARIANTS = [
+    ("agg",    r"\hat{R}_{\mathrm{agg}}",
+     r"Bias — aggregate-incidence $\hat{R}_{\mathrm{agg}}$",           "agg"),
+    ("ind_am", r"R^j_{\mathrm{ind},\mathrm{am}}",
+     r"Bias — arithmetic-mean $R^j_{\mathrm{ind}}$",                   "ind_am"),
+    ("out_am", r"\hat{R}^{\mathrm{out}}_{\mathrm{am}}",
+     r"Bias — arithmetic-mean $R^j_{\mathrm{out}}$",                   "out_am"),
+    ("ind_iw", r"R^j_{\mathrm{ind},\mathrm{iw}}",
+     r"Bias — incidence-weighted $R^j_{\mathrm{ind}}$",                "ind_iw"),
+    ("out_iw", r"\hat{R}^{\mathrm{out}}_{\mathrm{iw}}",
+     r"Bias — incidence-weighted $R^j_{\mathrm{out}}$",                "out_iw"),
+    ("ind_pw", r"R^j_{\mathrm{ind},\mathrm{pw}}",
+     r"Bias — population-weighted $R^j_{\mathrm{ind}}$",               "ind_pw"),
+    ("out_pw", r"\hat{R}^{\mathrm{out}}_{\mathrm{pw}}",
+     r"Bias — population-weighted $R^j_{\mathrm{out}}$",               "out_pw"),
+]
 
-    Combines in one figure the two distinct routes by which spatial aggregation
-    produces bias in estimating the network reproduction number ρ(R(t)):
 
-      i)  Weighting independent estimators: R^j_{ind,Rw}(t) — the R_out-weighted
-          average of per-location sliding-window estimates R^j_{ind}(t).
-      ii) Weighting outward reproduction numbers: E(t) = X(1,t) — the
-          R_out-weighted mean of R^j_out(t).
+DEFAULT_BIAS_ROW_LABELS = ("Dense urban (Scenario A)",
+                           "Sparse national (Scenario B)",
+                           "Hub-amplified (Scenario C)")
 
-    Layout — 3 rows (Scenario A / B / C) × 3 columns:
-      Col 0  Time series: ρ(R(t)) [solid, dark grey], R^j_{ind,Rw}(t) [dashed,
-             orange], E(t) [dotted, reddish-purple].  Colours are FIXED across
-             all rows so the legend is interpretable without per-row lookup.
-      Col 1  Signed bias R^j_{ind,Rw} − ρ(R).
-      Col 2  Signed bias E(t) − ρ(R).
-             Both bias panels use IDENTICAL fill colours:
-               vermillion (#D55E00) = over-estimate (positive bias)
-               sky-blue   (#56B4E9) = under-estimate (negative bias)
-             Statistics (Mean bias, MAE, MSE) shown in black.
 
-    Panel labels A–I.
-    Saved as: {save_prefix}_main_bias_combined.pdf
+def _compute_main_bias_data(sim_A, sim_B, sim_C, city_A, city_B, city_C,
+                            gen_time_pmf, labels=None):
+    """Naive-estimator suites for the three scenario rows of the bias figures.
+
+    labels overrides the row titles, e.g. for the heterogeneous counterparts of
+    A/B/C; it must give exactly three labels in row order.
+
+    Returns [(suite_dict, scenario_label), ...] in row order A, B, C.
     """
+    labs = DEFAULT_BIAS_ROW_LABELS if labels is None else tuple(labels)
+    if len(labs) != 3:
+        raise ValueError(f"bias figures need exactly 3 row labels, got {len(labs)}")
     scenarios = [
-        (sim_A, city_A, "Dense urban (Scenario A)"),
-        (sim_B, city_B, "Sparse national (Scenario B)"),
-        (sim_C, city_C, "Hub-amplified (Scenario C)"),
+        (sim_A, city_A, labs[0]),
+        (sim_B, city_B, labs[1]),
+        (sim_C, city_C, labs[2]),
     ]
-    print("  Computing naive estimator suite for combined bias figure ...")
-    all_data = []
-    for sim, city, label in scenarios:
-        d = _compute_naive_suite(sim, city, gen_time_pmf)
-        all_data.append((d, label))
+    return [(_compute_naive_suite(sim, city, gen_time_pmf), label)
+            for sim, city, label in scenarios]
+
+
+def _plot_main_bias_3x3(all_data, est_key, est_tex, est_title, fname):
+    """Draw one 3-row × 3-col spatial-aggregation-bias figure.
+
+    Shared by plot_main_bias_figure and plot_main_bias_variant_figures so that
+    every variant has an identical layout, colour scheme and statistics box.
+
+    all_data  : [(suite_dict, scenario_label), ...] — one entry per row
+                (exactly three, ordered A, B, C).
+    est_key   : key into the suite dict for the middle-column estimator.
+    est_tex   : LaTeX for that estimator (no outer $, no trailing "(t)").
+    est_title : second title line of the middle-column panels.
+    fname     : full output path (.pdf).
+
+    Col 0  Time series: ρ(R(t)) [solid, dark charcoal], the estimator [dashed,
+           orange], E(t) [dotted, reddish-purple].  Colours are FIXED across
+           all rows so the legend is interpretable without per-row lookup.
+    Col 1  Signed bias  estimator − ρ(R(t)).
+    Col 2  Signed bias  E(t) − ρ(R(t))  — identical in every variant, so each
+           figure shows its estimator against the same E(t) benchmark.
+           Both bias panels use IDENTICAL fill colours:
+             vermillion (#D55E00) = over-estimate (positive bias)
+             sky-blue   (#56B4E9) = under-estimate (negative bias)
+
+    Growth phase.  Every panel shades the days on which ρ(R(t)) > 1 — the only
+    days on which the estimate can change a decision.  Roughly half of a 365-day
+    run is the burnt-out tail, where every scheme agrees, so statistics pooled
+    over all days are diluted by a factor of about two.  The band is drawn from
+    the ρ > 1 mask itself, so where day-of-week variation flickers R(t) across the
+    threshold the band flickers with it; that is real, not a rendering artefact.
+
+    Statistics scope.  Each panel scores its own estimator on the days that
+    estimator is defined, whereas error_tables uses a mask common to all schemes so
+    its columns are mutually comparable.  The two therefore differ slightly for the
+    same scheme and scenario; quote the tables, not the panels, for cross-scheme
+    comparisons.
+
+    Matched reference.  A sliding-window estimator summarises the preceding
+    ESTIMATOR_WINDOW days, so it is scored against the trailing mean of ρ(R(t))
+    over the same window, not against ρ at day t.  ρ oscillates with the
+    day-of-week commuting cycle, so charging a smoother for smoothing inflates
+    its error several-fold.  Whether a column is windowed comes from
+    error_tables.SCHEMES, the single source of truth.  When the middle column is
+    windowed, column 0 also draws that trailing mean, so the reader can see what
+    the bias is measured against.  E(t) carries no window and keeps ρ(R(t)).
+
+    Statistics box, replacing the earlier {Bias, MAE, MSE} over all days:
+      MRE   mean of |estimator − reference| / reference, per cent, per phase.
+            Relative rather than absolute because ρ runs from about 1.6 down to
+            0.6 over one epidemic, so an absolute MAE is not comparable between
+            phases or between scenarios.
+      bias  mean of (estimator − reference) / reference, per cent, per phase.  Next to
+            MRE because either alone misleads: pooled over all days the signed
+            value cancels almost exactly (it flips sign at the threshold), and
+            MRE alone hides the direction.  MRE = |bias| means a one-signed error.
+      threshold  the estimator's settled crossing of 1 minus its matched
+            reference's crossing, in days,
+            worded "early" or "late".  This is the decision-relevant quantity:
+            "declares the epidemic under control 48 days early" is what a
+            relative error of 23% actually costs.
+    MSE is not reported: in units of R² it has no interpretable scale and it
+    ranks schemes identically to MRE here.
+
+    Panel labels A–I, row-major.
+    """
+    if len(all_data) != 3:
+        raise ValueError(
+            f"_plot_main_bias_3x3 expects exactly 3 scenario rows, got {len(all_data)}")
+
+    # Does the middle-column estimator carry a sliding window?  Looked up from the
+    # single source of truth rather than duplicated here, so a scheme can never be
+    # scored against the wrong reference.
+    _by_key = {sch.key: sch for sch in SCHEMES}
+    if est_key not in _by_key:
+        raise KeyError(f"{est_key!r} has no entry in error_tables.SCHEMES, so its "
+                       f"smoothing is unknown and it cannot be scored")
+    est_windowed = _by_key[est_key].windowed
+    ref_tex_est = (rf"\overline{{\mathcal{{R}}}}_{{{ESTIMATOR_WINDOW}}}(t)"
+                   if est_windowed else r"\mathcal{R}(t)")
 
     # ── Fixed colours — identical in every row ────────────────────────────
     COL_RHO   = "#333333"       # dark charcoal  — ρ(R(t)), the truth
-    COL_IND   = OKABE_ITO[0]    # orange         — R^j_{ind,Rw}
+    COL_EST   = OKABE_ITO[0]    # orange         — middle-column estimator
     COL_ET    = OKABE_ITO[6]    # reddish-purple — E(t)
     COL_OVER  = "#D55E00"       # vermillion     — positive bias (both cols 1 & 2)
     COL_UNDER = "#56B4E9"       # sky blue       — negative bias (both cols 1 & 2)
     COL_LINE  = "0.30"          # dark grey bias trace
+    COL_GROWTH = "#F0F0F0"      # growth-phase band, R(t) > 1
+    COL_REF    = "#7E9BB5"       # muted blue-grey — the matched (smoothed) reference
     PANEL_IDS = list("ABCDEFGHI")
 
     # scenario colours used only for title accent
@@ -1334,32 +1444,75 @@ def plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C,
     for row, (d, sc_label) in enumerate(all_data):
         t_arr     = np.arange(d["T"])
         rho_t     = d["rho_t"]
-        ind_Rw    = d["ind_Rw"]
+        est_t     = np.asarray(d[est_key], dtype=float)
         E_t       = d["out_Rw"]
         peak_t    = d["peak_t"]
         sc_col    = SC_COLS[row]
 
-        valid_ind = ~np.isnan(ind_Rw)
-        valid_rho = rho_t > 0.05
+        valid_est = ~np.isnan(est_t)
+        valid_rho = rho_t > RHO_FLOOR
+        growth_m  = valid_rho & (rho_t > 1.0)     # the days a decision hangs on
+        decline_m = valid_rho & (rho_t <= 1.0)    # the days it no longer matters
 
-        bias_ind = np.where(valid_rho & valid_ind, ind_Rw - rho_t, np.nan)
-        bias_E   = np.where(valid_rho, E_t - rho_t, np.nan)
+        # Each column is scored against the reference matched to its own smoothing:
+        # a sliding-window estimate summarises the preceding ESTIMATOR_WINDOW days,
+        # so it is compared with the trailing mean of rho, not with rho at day t.
+        # The MASK stays on the unsmoothed rho: it selects which days matter.
+        ref_by_window = references(rho_t, ESTIMATOR_WINDOW)
+        ref_est = ref_by_window[est_windowed]
+        ref_E   = ref_by_window[False]            # E(t) carries no window
+        cross_est_ref = threshold_crossing_day(ref_est)
+        cross_E_ref   = threshold_crossing_day(ref_E)
 
-        def _stats(b):
-            v = b[~np.isnan(b)]
-            if v.size == 0:
-                return np.nan, np.nan, np.nan
-            return float(v.mean()), float(np.mean(np.abs(v))), float(np.mean(v**2))
+        def _ref_ok(ref):
+            """Days on which a reference is usable as a relative-error denominator."""
+            return np.isfinite(ref) & (ref > RHO_FLOOR)
+
+        bias_est = np.where(_ref_ok(ref_est) & valid_est, est_t - ref_est, np.nan)
+        bias_E   = np.where(_ref_ok(ref_E), E_t - ref_E, np.nan)
+
+        def _rel(bias, ref, mask):
+            """Mean absolute and mean signed error, RELATIVE to `ref`, in per cent.
+
+            Relative rather than absolute because rho spans roughly 1.6 down to 0.6
+            over one run, so an absolute MAE is not comparable between the growth
+            and decline phases, nor between scenarios.  Both are reported because
+            either alone misleads: the signed value cancels (it flips sign between
+            the phases here), and the absolute value hides the direction.
+            """
+            m = mask & ~np.isnan(bias) & np.isfinite(ref)
+            if not m.any():
+                return None, None
+            r = bias[m] / ref[m]
+            return float(np.mean(np.abs(r)) * 100.0), float(np.mean(r) * 100.0)
+
+        def _lag_txt(est, cross_ref):
+            """Signed threshold-crossing error, in days, against the matched reference."""
+            ce = threshold_crossing_day(est)
+            if ce is None or cross_ref is None:
+                return "n/a"
+            d = ce - cross_ref
+            if d == 0:
+                return "on time"
+            return f"{abs(d)} d {'early' if d < 0 else 'late'}"
 
         # ── Col 0: time series (fixed colours across rows) ─────────────────
         ax = fig.add_subplot(gs[row, 0])
+        ax.fill_between(t_arr, 0, 1, where=growth_m, step="mid",
+                        transform=ax.get_xaxis_transform(),
+                        color=COL_GROWTH, lw=0, zorder=0)
         ax.plot(t_arr[valid_rho], rho_t[valid_rho],
                 color=COL_RHO, lw=1.5, label=r"$\mathcal{R}(t)$", zorder=4)
-        ax.plot(t_arr[valid_ind], ind_Rw[valid_ind],
-                color=COL_IND, lw=1.0, ls="--",
-                label=r"$R^j_{\mathrm{ind},Rw}(t)$", zorder=5)
+        ax.plot(t_arr[valid_est], est_t[valid_est],
+                color=COL_EST, lw=1.0, ls="--",
+                label=f"${est_tex}(t)$", zorder=5)
         ax.plot(t_arr, E_t, color=COL_ET, lw=1.0, ls=":",
                 label=r"$\mathcal{E}(t)$", zorder=5)
+        if est_windowed:
+            # The windowed estimator is scored against this, not against rho(t).
+            vr = valid_rho & np.isfinite(ref_est)
+            ax.plot(t_arr[vr], ref_est[vr], color=COL_REF, lw=0.9, ls="-",
+                    label=f"${ref_tex_est}$", zorder=3)
         ax.axhline(1.0, color="0.60", ls=":", lw=0.7, zorder=1)
         ax.axvline(peak_t, color="0.55", ls="--", lw=0.7, alpha=0.45, zorder=1)
         ax.set_xlabel("Day $t$", fontsize=7)
@@ -1372,7 +1525,10 @@ def plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C,
         _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
 
         # ── helper: draw one bias panel ────────────────────────────────────
-        def _bias_panel(ax_b, bias, ylabel, title_suffix):
+        def _bias_panel(ax_b, est, bias, ref, cross_ref, ylabel, title_suffix):
+            ax_b.fill_between(t_arr, 0, 1, where=growth_m, step="mid",
+                              transform=ax_b.get_xaxis_transform(),
+                              color=COL_GROWTH, lw=0, zorder=0)
             bv = ~np.isnan(bias)
             if bv.any():
                 pos = bv & (bias > 0)
@@ -1388,16 +1544,29 @@ def plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C,
                 ax_b.plot(t_arr[bv], bias[bv], color=COL_LINE, lw=0.8, zorder=3)
             ax_b.axhline(0, color="0.60", ls="--", lw=0.7)
             ax_b.axvline(peak_t, color="0.55", ls="--", lw=0.7, alpha=0.45)
-            # statistics in black
-            mn, mae, mse = _stats(bias)
-            stats_str = (f"Bias $= {mn:+.3f}$\n"
-                         f"MAE $= {mae:.3f}$\n"
-                         f"MSE $= {mse:.4f}$")
+            # Statistics, split by phase.  Pooling them is what made the old
+            # single "Bias" line uninformative: the sign flips at the threshold,
+            # so the two halves cancel to roughly zero.
+            # Numbers go inside mathtext so a negative renders as a true minus
+            # sign rather than a hyphen.
+            def _num(v, signed):
+                if v is None:
+                    return "n/a"
+                return f"${v:+.1f}$%" if signed else f"${v:.1f}$%"
+
+            g_mae, g_bias = _rel(bias, ref, growth_m)
+            d_mae, d_bias = _rel(bias, ref, decline_m)
+            stats_str = (
+                f"$\\mathcal{{R}}>1$    MRE {_num(g_mae, False)}"
+                f"   bias {_num(g_bias, True)}\n"
+                f"$\\mathcal{{R}}\\leq 1$    MRE {_num(d_mae, False)}"
+                f"   bias {_num(d_bias, True)}\n"
+                f"threshold   {_lag_txt(est, cross_ref)}")
             ax_b.text(0.03, 0.97, stats_str,
-                      transform=ax_b.transAxes, fontsize=5,
-                      ha="left", va="top", color="black",
+                      transform=ax_b.transAxes, fontsize=4.6,
+                      ha="left", va="top", color="black", linespacing=1.35,
                       bbox=dict(facecolor="white", edgecolor="0.80",
-                                linewidth=0.5, alpha=0.85, pad=2.0))
+                                linewidth=0.5, alpha=0.88, pad=2.0))
             if bv.any():
                 ax_b.legend(fontsize=5.0, borderpad=0.3, labelspacing=0.12,
                             loc="lower right")
@@ -1407,25 +1576,492 @@ def plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C,
                            fontsize=6.5, pad=3, color=sc_col, fontweight="bold")
             ax_b.tick_params(labelsize=6)
 
-        # ── Col 1: bias from independent estimator ──────────────────────────
+        # ── Col 1: bias from the selected aggregation scheme ────────────────
         ax = fig.add_subplot(gs[row, 1])
-        _bias_panel(ax, bias_ind,
-                    r"$R^j_{\mathrm{ind},Rw} - \mathcal{R}(t)$",
-                    r"Bias — $R^j_{\mathrm{ind},Rw}$ weighting")
+        _bias_panel(ax, est_t, bias_est, ref_est, cross_est_ref,
+                    f"${est_tex} - {ref_tex_est}$",
+                    est_title)
         _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
 
         # ── Col 2: bias from outward R weighting ────────────────────────────
         ax = fig.add_subplot(gs[row, 2])
-        _bias_panel(ax, bias_E,
+        _bias_panel(ax, E_t, bias_E, ref_E, cross_E_ref,
                     r"$\mathcal{E}(t) - \mathcal{R}(t)$",
                     r"Bias — $\mathcal{E}(t)$ weighting")
         _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
 
-    fname = f"{save_prefix}_main_bias_combined.pdf"
     plt.savefig(fname, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Saved {fname}")
 
+
+def plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C,
+                          gen_time_pmf, save_prefix="fig", all_data=None,
+                          labels=None):
+    """Main-manuscript figure: spatial aggregation bias from two sources.
+
+    Combines in one figure the two distinct routes by which spatial aggregation
+    produces bias in estimating the network reproduction number ρ(R(t)):
+
+      i)  Weighting independent estimators: R^j_{ind,Rw}(t) — the per-location
+          sliding-window estimates R^j_{ind}(t) averaged with weights equal to their
+          own value (w_j = R^j_{ind}/Σ_k R^k_{ind}), i.e. Σ_j (R^j_{ind})² / Σ_j R^j_{ind}.
+      ii) Weighting outward reproduction numbers: E(t) = X(1,t) — the
+          R_out-weighted mean of R^j_out(t).
+
+    Layout is documented on _plot_main_bias_3x3; the middle column here is the
+    R_ind-self-weighted scheme.  Pass a precomputed all_data (from
+    _compute_main_bias_data) to skip re-running the estimator suite; `labels` is
+    then IGNORED, because all_data already carries its own row labels.
+    `labels` overrides the three row titles when all_data is not supplied.
+
+    Panel labels A–I.
+    Saved as: {save_prefix}_main_bias_combined.pdf
+    Returns the estimator-suite data so variants can reuse it.
+    """
+    if all_data is None:
+        print("  Computing naive estimator suite for combined bias figure ...")
+        all_data = _compute_main_bias_data(sim_A, sim_B, sim_C,
+                                           city_A, city_B, city_C, gen_time_pmf,
+                                           labels=labels)
+    _plot_main_bias_3x3(
+        all_data, "ind_Rw", r"R^j_{\mathrm{ind},Rw}",
+        r"Bias — $R^j_{\mathrm{ind},Rw}$ weighting",
+        f"{save_prefix}_main_bias_combined.pdf")
+    return all_data
+
+
+def plot_main_bias_variant_figures(sim_A, sim_B, sim_C, city_A, city_B, city_C,
+                                   gen_time_pmf, save_prefix="fig",
+                                   all_data=None, labels=None):
+    """Seven companions to plot_main_bias_figure, one per aggregation scheme.
+
+    Identical layout, colours and statistics to {save_prefix}_main_bias_combined.pdf;
+    only the middle column changes.  The right column stays E(t) − ρ(R(t)) in every
+    figure, so each scheme is read against the same benchmark.
+
+    Middle-column schemes (in order), all defined in _compute_naive_suite:
+      i)   agg     sliding-window R̂ on the network-total incidence
+      ii)  ind_am  arithmetic mean of the per-location R^j_ind(t)
+      iii) out_am  arithmetic mean of the model's R^j_out(t)
+      iv)  ind_iw  incidence-weighted mean of R^j_ind(t)
+      v)   out_iw  incidence-weighted mean of R^j_out(t)
+      vi)  ind_pw  population-weighted mean of R^j_ind(t)
+      vii) out_pw  population-weighted mean of R^j_out(t)
+
+    Saved as: {save_prefix}_main_bias_combined_{suffix}.pdf
+    `labels` overrides the three row titles; it is IGNORED when a precomputed
+    all_data is supplied, since all_data already carries its own row labels.
+    Returns the estimator-suite data so it can be reused again.
+    """
+    if all_data is None:
+        print("  Computing naive estimator suite for bias-variant figures ...")
+        all_data = _compute_main_bias_data(sim_A, sim_B, sim_C,
+                                           city_A, city_B, city_C, gen_time_pmf,
+                                           labels=labels)
+    for est_key, est_tex, est_title, sfx in _MAIN_BIAS_VARIANTS:
+        _plot_main_bias_3x3(
+            all_data, est_key, est_tex, est_title,
+            f"{save_prefix}_main_bias_combined_{sfx}.pdf")
+    return all_data
+
+
+
+def plot_estimator_error_summary(table, pairs, save_prefix="fig",
+                                 fname_suffix="estimator_error_summary"):
+    """Dumbbell summary: what heterogeneous transmissibility does to each scheme.
+
+    The error tables answer "how wrong is each scheme"; this figure answers the
+    question the tables make you flip between columns to see — how much does
+    switching heterogeneity on move each scheme.  One row per period, one column
+    per scenario pair, one dumbbell per aggregation scheme.
+
+    table : the dict returned by mobility_rt.error_tables.compute_error_table.
+    pairs : [(homogeneous_label, heterogeneous_label, panel_title), ...]; the two
+            labels must both be columns of `table`.
+
+    Form — dumbbell, because the data is before/after per item.  Emphasis colouring
+    (one hue plus a de-emphasis grey) rather than two categorical hues: the
+    heterogeneous point is the subject and the homogeneous point is its baseline.
+    A leftward heterogeneous marker means the scheme got BETTER, which does happen.
+
+    A log x-axis is used because the values span more than two decades
+    (0.15% to 31%); exact numbers live in the CSV/LaTeX tables alongside.  Read
+    connector LENGTH as a ratio, not a difference: on a log axis equal lengths mean
+    equal fold-changes, so a short bar low on the axis can be a bigger multiple than
+    a long-looking one would be on a linear scale.
+
+    Rows are shaded by family (aggregate / per-location independent / model-based
+    outward), computed from contiguous runs of the scheme list rather than assumed
+    to be one block, so adding a scheme in the middle cannot silently shade the
+    wrong row.
+
+    Periods shown are TABLE_PERIODS, matching the CSV and LaTeX tables this figure
+    accompanies.  The "decline" period is computed but not drawn here.
+
+    Each scheme is scored against the reference matched to its own smoothing (see
+    error_tables), so windowed and instantaneous schemes are comparable.
+
+    Saved as: {save_prefix}_{fname_suffix}.pdf
+    """
+    from mobility_rt.error_tables import TABLE_PERIODS
+
+    COL_HET  = OKABE_ITO[4]     # blue  — the condition of interest
+    COL_HOM  = "#8C8C8C"        # grey  — the homogeneous baseline (context)
+    COL_LINK = "#C4C4C4"        # recessive connector
+    COL_BAND = "#F2F2F2"        # family grouping band
+    PANEL_IDS = list("ABCDEFGHI")
+
+    for homog, het, _ in pairs:
+        for lab in (homog, het):
+            if lab not in table[TABLE_PERIODS[0]]["labels"]:
+                raise KeyError(f"{lab!r} is not a column of the error table; "
+                               f"have {table[TABLE_PERIODS[0]]['labels']}")
+
+    # Row order = table order, so figure and tables can be read side by side.
+    keys   = [sch.key for sch in SCHEMES]
+    ylabs  = [sch.tex for sch in SCHEMES]
+    n      = len(keys)
+    ypos   = np.arange(n)
+    # Family of each row, then the CONTIGUOUS runs of it.  Runs are computed rather
+    # than assumed: a future scheme inserted mid-list would otherwise be shaded as
+    # part of a neighbouring family.
+    def _family(k):
+        return k.split("_", 1)[0]
+    fams = [_family(k) for k in keys]
+    runs = []                      # (start, stop_exclusive, family)
+    i = 0
+    while i < len(fams):
+        j = i
+        while j + 1 < len(fams) and fams[j + 1] == fams[i]:
+            j += 1
+        runs.append((i, j + 1, fams[i]))
+        i = j + 1
+    # shade alternate runs so neighbouring families never merge into one band
+    shaded = [r for idx, r in enumerate(runs) if idx % 2 == 1]
+
+    # Height scales with the number of schemes so the LaTeX row labels, which carry
+    # superscripts and subscripts, never collide when a scheme is added.
+    fig_h = 1.05 + 0.30 * n * len(TABLE_PERIODS) / 2.0
+    fig = plt.figure(figsize=(7.2, fig_h))
+    gs  = gridspec.GridSpec(len(TABLE_PERIODS), len(pairs), hspace=0.42, wspace=0.10,
+                            left=0.30, right=0.975, top=0.88, bottom=0.09)
+
+    # Global x-range so every panel is directly comparable.
+    vals = [table[p]["mre"][k][lab]
+            for p in TABLE_PERIODS for k in keys
+            for homog, het, _ in pairs for lab in (homog, het)]
+    vals = [v for v in vals if np.isfinite(v) and v > 0]
+    xlo  = 10 ** np.floor(np.log10(min(vals)))
+    xhi  = 10 ** np.ceil(np.log10(max(vals)))
+
+    panel_idx = 0
+    for r, period in enumerate(TABLE_PERIODS):
+        d = table[period]
+        for c, (homog, het, title) in enumerate(pairs):
+            ax = fig.add_subplot(gs[r, c])
+            # Shade ONLY the independent family, so aggregate / independent /
+            # outward read as three separate blocks.  Shading two adjacent
+            # families the same tone merges them into one band.
+            for lo, hi, _f in shaded:
+                ax.axhspan(lo - 0.5, hi - 0.5, color=COL_BAND, zorder=0, lw=0)
+            for lo, _hi, _f in runs[1:]:
+                ax.axhline(lo - 0.5, color="0.80", lw=0.5, zorder=1)
+
+            x0 = np.array([d["mre"][k][homog] for k in keys], dtype=float)
+            x1 = np.array([d["mre"][k][het]   for k in keys], dtype=float)
+            for y, a, b in zip(ypos, x0, x1):
+                if np.isfinite(a) and np.isfinite(b):
+                    ax.plot([a, b], [y, y], color=COL_LINK, lw=1.6,
+                            solid_capstyle="round", zorder=2)
+            ax.scatter(x0, ypos, s=20, color=COL_HOM, zorder=3, clip_on=False)
+            ax.scatter(x1, ypos, s=26, color=COL_HET, zorder=4, clip_on=False)
+
+            ax.set_xscale("log")
+            ax.set_xlim(xlo, xhi)
+            ax.set_ylim(n - 0.5, -0.5)          # first scheme at the top
+            ax.set_yticks(ypos)
+            ax.set_yticklabels(ylabs if c == 0 else [], fontsize=6)
+            ax.tick_params(axis="x", labelsize=6)
+            ax.grid(axis="x", color="0.85", lw=0.5, ls=":", zorder=1)
+            ax.set_axisbelow(True)
+            period_txt = {"growth":  "Growth phase ($\\mathcal{R}>1$)",
+                          "decline": "Decline ($\\mathcal{R}\\leq 1$)",
+                          "full":    "Full period"}[period]
+            ax.set_title(f"{title}\n{period_txt}", fontsize=6.5, pad=3,
+                         fontweight="bold")
+            _panel_label(ax, PANEL_IDS[panel_idx],
+                         x=(-0.62 if c == 0 else -0.10), y=1.22)
+            panel_idx += 1
+
+    # One shared x-label: three per-panel copies of this sentence overlap.
+    fig.supxlabel("Mean relative error against the network reproduction number (%)",
+                  fontsize=7.5, y=0.012)
+
+    # Figure-level legend, so it never sits on top of a panel's data.
+    handles = [Line2D([], [], marker="o", ls="none", color=COL_HOM,
+                      markersize=5, label="Homogeneous"),
+               Line2D([], [], marker="o", ls="none", color=COL_HET,
+                      markersize=5.7, label="Heterogeneous"),
+               Line2D([], [], color=COL_LINK, lw=1.6,
+                      label="Effect of heterogeneity")]
+    fig.legend(handles=handles, loc="upper center", ncol=3, fontsize=6.5,
+               frameon=False, bbox_to_anchor=(0.5, 0.985),
+               handletextpad=0.5, columnspacing=1.6)
+
+    fname = f"{save_prefix}_{fname_suffix}.pdf"
+    plt.savefig(fname, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved {fname}")
+    return fname
+
+
+def plot_location_discrepancy(table, scenario_titles=None, save_prefix="fig",
+                              fname_suffix="location_discrepancy"):
+    """Dumbbell per location: what a single location's own estimate is tracking.
+
+    table : the dict returned by mobility_rt.location_errors.compute_location_table.
+    scenario_titles : optional {label: panel title}; labels without an entry use
+                      the label itself.
+
+    One panel per scenario, one row per location, two markers per row:
+      grey  the estimate's mean relative distance from the NETWORK value rho(R(t))
+      blue  its distance from that location's OWN outward reproduction number
+
+    Reading it: the grey markers sit in a tight column at small values in every
+    scenario, while the blue markers fan out to the right once transmissibility is
+    heterogeneous.  A location's independent estimate tracks the network, not the
+    location.  The connector length is therefore how much a reader would be misled
+    by treating a local estimate as local.
+
+    Form — dumbbell, because the data is two paired measurements per item, with
+    emphasis colouring (one hue plus a de-emphasis grey) rather than two
+    categorical hues: the distance from the location's own value is the subject and
+    the distance from the network value is its baseline.  A log x-axis is used
+    because the values span more than two decades; read connector LENGTH as a
+    ratio, not a difference.
+
+    Saved as: {save_prefix}_{fname_suffix}.pdf
+    """
+    from mobility_rt.location_errors import COMPARATORS
+
+    keys = [c[0] for c in COMPARATORS]
+    if set(keys) != {"own", "net"}:
+        raise ValueError(f"this figure expects the 'own' and 'net' comparators, "
+                         f"got {keys}")
+    labels = list(table)
+    if not labels:
+        raise ValueError("the location table has no scenarios")
+    titles = {l: l for l in labels}
+    if scenario_titles:
+        titles.update(scenario_titles)
+
+    COL_NET  = "#8C8C8C"        # grey  — distance from the network value (baseline)
+    COL_OWN  = OKABE_ITO[4]     # blue  — distance from the location's own R_out
+    COL_LINK = "#C4C4C4"
+    COL_BAND = "#F2F2F2"
+    PANEL_IDS = list("ABCDEFGHIJKL")
+
+    n_loc = len(table[labels[0]]["own"]["mre"])
+    for l in labels:
+        for k in keys:
+            if len(table[l][k]["mre"]) != n_loc:
+                raise ValueError(f"{l}/{k} has {len(table[l][k]['mre'])} locations, "
+                                 f"expected {n_loc}")
+
+    if len(labels) > len(PANEL_IDS):
+        raise ValueError(f"only {len(PANEL_IDS)} panel letters are defined, "
+                         f"got {len(labels)} scenarios")
+    ncol = min(3, len(labels))
+    nrow = int(np.ceil(len(labels) / ncol))
+    ypos = np.arange(n_loc)
+    fig_h = 1.05 + 0.26 * n_loc * nrow
+    fig = plt.figure(figsize=(7.2, fig_h))
+    gs = gridspec.GridSpec(nrow, ncol, hspace=0.40, wspace=0.10,
+                           left=0.13, right=0.975, top=0.90, bottom=0.09)
+
+    # A log axis cannot show a zero discrepancy, so zeros are excluded from the
+    # RANGE calculation only; they still plot, clamped to the left edge.
+    vals = [v for l in labels for k in keys for v in table[l][k]["mre"] if v > 0]
+    if not vals:
+        raise ValueError("every location discrepancy is zero; nothing to plot")
+    xlo = 10 ** np.floor(np.log10(min(vals)))
+    xhi = 10 ** np.ceil(np.log10(max(vals)))
+
+    for i, lab in enumerate(labels):
+        ax = fig.add_subplot(gs[i // ncol, i % ncol])
+        for y in range(0, n_loc, 2):                 # banding aids row tracking
+            ax.axhspan(y - 0.5, y + 0.5, color=COL_BAND, zorder=0, lw=0)
+        x_net = np.asarray(table[lab]["net"]["mre"], dtype=float)
+        x_own = np.asarray(table[lab]["own"]["mre"], dtype=float)
+        for y, a, b in zip(ypos, x_net, x_own):
+            if np.isfinite(a) and np.isfinite(b):
+                ax.plot([a, b], [y, y], color=COL_LINK, lw=1.6,
+                        solid_capstyle="round", zorder=2)
+        ax.scatter(x_net, ypos, s=20, color=COL_NET, zorder=3, clip_on=False)
+        ax.scatter(x_own, ypos, s=26, color=COL_OWN, zorder=4, clip_on=False)
+        ax.set_xscale("log")
+        ax.set_xlim(xlo, xhi)
+        ax.set_ylim(n_loc - 0.5, -0.5)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels([f"L{j + 1}" for j in range(n_loc)]
+                           if i % ncol == 0 else [], fontsize=6)
+        ax.tick_params(axis="x", labelsize=6)
+        ax.grid(axis="x", color="0.85", lw=0.5, ls=":", zorder=1)
+        ax.set_axisbelow(True)
+        ax.set_title(titles[lab], fontsize=7, pad=3, fontweight="bold")
+        _panel_label(ax, PANEL_IDS[i], x=(-0.30 if i % ncol == 0 else -0.10), y=1.16)
+
+    fig.supxlabel("Mean relative discrepancy of the location's independent "
+                  "estimate (%)", fontsize=7.5, y=0.012)
+    handles = [Line2D([], [], marker="o", ls="none", color=COL_NET, markersize=5,
+                      label="from the network $\\mathcal{R}(t)$"),
+               Line2D([], [], marker="o", ls="none", color=COL_OWN, markersize=5.7,
+                      label="from the location's own $R^j_{\\mathrm{out}}(t)$"),
+               Line2D([], [], color=COL_LINK, lw=1.6, label="how much they differ")]
+    fig.legend(handles=handles, loc="upper center", ncol=3, fontsize=6.5,
+               frameon=False, bbox_to_anchor=(0.5, 0.988),
+               handletextpad=0.5, columnspacing=1.6)
+
+    fname = f"{save_prefix}_{fname_suffix}.pdf"
+    plt.savefig(fname, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved {fname}")
+    return fname
+
+
+def plot_location_diagnostics(table, scenario_titles=None, save_prefix="fig",
+                              fname_suffix="location_diagnostics"):
+    """Three things a panel of per-location estimates can and cannot tell you.
+
+    table : the dict returned by mobility_rt.location_errors.compute_diagnostics_table.
+
+    One row per scenario, three panels, each answering a question a public health
+    team actually has:
+
+      a  Can I RANK locations by their estimates to find the worst place?
+         Across-location rank correlation with the true outward reproduction
+         numbers: median with its interquartile range over days.  A value at or
+         below zero, drawn in vermillion, means ranking by the estimates does not
+         find where transmission is highest, and a negative one means it points
+         the wrong way.
+      b  Does a panel of estimates convey HOW HETEROGENEOUS the network is?
+         Spread of the estimates against the true spread, on a log axis.  The
+         estimates sitting well to the left means a flat-looking panel is hiding
+         real heterogeneity.
+      c  Does a location's estimate tell THAT LOCATION whether its cases are
+         rising?  Agreement with local cases actually rising, against agreement
+         with that location's own outward number exceeding one.  The 50% line is
+         chance.
+
+    Companion to plot_location_discrepancy, which is kept: that figure shows the
+    raw distances, this one shows what they mean for a decision.
+
+    Saved as: {save_prefix}_{fname_suffix}.pdf
+    """
+    labels = list(table)
+    if not labels:
+        raise ValueError("the diagnostics table has no scenarios")
+    required = ("rank_median", "rank_q1", "rank_q3", "cv_est", "cv_true",
+                "agree_growth", "agree_own")
+    for lab in labels:
+        missing = [k for k in required if k not in table[lab]]
+        if missing:
+            raise KeyError(f"{lab} is missing {missing}")
+    titles = {l: l for l in labels}
+    if scenario_titles:
+        titles.update(scenario_titles)
+
+    COL_GOOD = OKABE_ITO[4]     # blue       — the informative reading
+    COL_BAD  = "#D55E00"        # vermillion — a reading that misleads
+    COL_CTX  = "#8C8C8C"        # grey       — the reference it is judged against
+    COL_LINK = "#C4C4C4"
+    COL_BAND = "#F2F2F2"
+
+    n = len(labels)
+    ypos = np.arange(n)
+    fig = plt.figure(figsize=(7.2, 1.15 + 0.32 * n))
+    gs = gridspec.GridSpec(1, 3, wspace=0.30,
+                           left=0.20, right=0.975, top=0.80, bottom=0.20)
+
+    def _frame(ax, first):
+        for y in range(0, n, 2):
+            ax.axhspan(y - 0.5, y + 0.5, color=COL_BAND, zorder=0, lw=0)
+        # A blank strip below the last row holds the per-panel legends; without it
+        # they sit on top of the bottom scenario's markers.
+        ax.set_ylim(n + 0.45, -0.5)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels([titles[l] for l in labels] if first else [], fontsize=6)
+        ax.tick_params(axis="x", labelsize=6)
+        ax.grid(axis="x", color="0.85", lw=0.5, ls=":", zorder=1)
+        ax.set_axisbelow(True)
+
+    # ── a: can you rank locations? ────────────────────────────────────────
+    ax = fig.add_subplot(gs[0, 0]);  _frame(ax, True)
+    med = np.array([table[l]["rank_median"] for l in labels])
+    q1  = np.array([table[l]["rank_q1"] for l in labels])
+    q3  = np.array([table[l]["rank_q3"] for l in labels])
+    for y, a, b, m in zip(ypos, q1, q3, med):
+        ax.plot([a, b], [y, y], color=COL_LINK, lw=1.6,
+                solid_capstyle="round", zorder=2)
+        ax.scatter([m], [y], s=26, zorder=4, clip_on=False,
+                   color=COL_BAD if m <= 0 else COL_GOOD)
+    ax.axvline(0.0, color="0.45", ls="--", lw=0.8, zorder=3)
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_xlabel("Rank correlation with the\ntrue $R^{j}_{\\mathrm{out}}$", fontsize=7)
+    ax.set_title("a  Can you rank locations?", fontsize=7, pad=4,
+                 fontweight="bold", loc="left")
+
+    # ── b: is the heterogeneity visible? ──────────────────────────────────
+    ax = fig.add_subplot(gs[0, 1]);  _frame(ax, False)
+    est  = np.array([table[l]["cv_est"] for l in labels])
+    true = np.array([table[l]["cv_true"] for l in labels])
+    for y, a, b in zip(ypos, est, true):
+        ax.plot([a, b], [y, y], color=COL_LINK, lw=1.6,
+                solid_capstyle="round", zorder=2)
+    ax.scatter(true, ypos, s=20, color=COL_CTX, zorder=3, clip_on=False,
+               label="true spread")
+    ax.scatter(est, ypos, s=26, color=COL_GOOD, zorder=4, clip_on=False,
+               label="spread you see")
+    ax.set_xscale("log")
+    # Only one decade boundary falls inside this range, so a plain log locator
+    # leaves a single labelled tick; label the 1-2-5 steps that are in view.
+    lo, hi = min(est.min(), true.min()), max(est.max(), true.max())
+    ticks = [v for v in (0.5, 1, 2, 5, 10, 20, 50, 100) if lo / 1.6 <= v <= hi * 1.6]
+    if len(ticks) >= 2:
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f"{v:g}" for v in ticks])
+        ax.xaxis.set_minor_locator(ticker.NullLocator())
+    ax.set_xlabel("Spread across locations\n(coefficient of variation, %)", fontsize=7)
+    ax.set_title("b  Is the heterogeneity visible?", fontsize=7, pad=4,
+                 fontweight="bold", loc="left")
+    ax.legend(fontsize=5.2, borderpad=0.3, labelspacing=0.15, loc="lower right",
+              framealpha=0.9)
+
+    # ── c: does it track local growth? ────────────────────────────────────
+    ax = fig.add_subplot(gs[0, 2]);  _frame(ax, False)
+    grow = np.array([table[l]["agree_growth"] for l in labels])
+    own  = np.array([table[l]["agree_own"] for l in labels])
+    for y, a, b in zip(ypos, own, grow):
+        ax.plot([a, b], [y, y], color=COL_LINK, lw=1.6,
+                solid_capstyle="round", zorder=2)
+    ax.scatter(own, ypos, s=20, color=COL_CTX, zorder=3, clip_on=False,
+               label="own $R^{j}_{\\mathrm{out}}>1$")
+    ax.scatter(grow, ypos, s=26, color=COL_GOOD, zorder=4, clip_on=False,
+               label="local cases rising")
+    ax.axvline(50.0, color="0.45", ls="--", lw=0.8, zorder=3)
+    ax.set_xlim(40, 104)
+    ax.set_xlabel("Agreement with\nsign of $\\hat{R}^{j}-1$ (%)", fontsize=7)
+    ax.set_title("c  Does it track local growth?", fontsize=7, pad=4,
+                 fontweight="bold", loc="left")
+    ax.legend(fontsize=5.2, borderpad=0.3, labelspacing=0.15, loc="lower left",
+              framealpha=0.9)
+
+    fname = f"{save_prefix}_{fname_suffix}.pdf"
+    plt.savefig(fname, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved {fname}")
+    return fname
 
 def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
     """

@@ -17,11 +17,17 @@ def discretise_gamma(mean, sd, max_days):
         P(D=d) = ∫_d^{d+1} F(v) dv - ∫_{d-1}^{d} F(v) dv = IF(d+1) - 2·IF(d) + IF(d-1)
         IF(x)  = ∫_0^x F(v) dv = x·F(x; a, θ) - a·θ·F(x; a+1, θ)   (0 for x <= 0).
 
+    Double-interval-censoring recovers the mean exactly but, by construction, inflates
+    the variance by E[frac(1-frac)] ~ 1/6: the realised daily-pmf sd is sqrt(sd^2 + 1/6),
+    e.g. Gamma(5.5, 1.8) -> sd ~ 1.846.  The stated sd (1.8) is the latent continuous
+    distribution's; the discrete censored interval is genuinely more spread.  This is a
+    property of the censoring method, not a discretisation error.
+
     max_days must be large enough that the truncated tail mass is negligible: the pmf
     is renormalised after truncation, so a max_days that cuts non-trivial tail mass
-    biases the mean low (e.g. Gamma(5.5,1.8): max_days=25 removes ~2e-10 = safe;
-    max_days=10 removes ~0.6% and shifts the mean).  The SI convergence figure varies
-    max_days deliberately to demonstrate this.
+    biases the mean low (e.g. Gamma(5.5,1.8): max_days=25 removes ~4e-10 = safe;
+    max_days=10 removes ~2.7% and shifts the mean ~0.14 d).  The SI convergence figure
+    varies max_days deliberately to demonstrate this.
     """
     shape = (mean / sd) ** 2
     scale = sd ** 2 / mean
@@ -35,4 +41,9 @@ def discretise_gamma(mean, sd, max_days):
     pmf = np.array([_int_F(d + 1) - 2.0 * _int_F(d) + _int_F(d - 1)
                     for d in range(max_days)])
     pmf = np.clip(pmf, 0.0, None)
-    return pmf / pmf.sum()
+    total = pmf.sum()
+    if total < 1e-300:
+        raise ValueError(
+            f"discretise_gamma: all probability mass falls beyond max_days={max_days} "
+            f"for Gamma(mean={mean}, sd={sd}); increase max_days.")
+    return pmf / total

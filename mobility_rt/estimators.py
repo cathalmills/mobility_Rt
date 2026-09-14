@@ -1,7 +1,11 @@
 """mobility_rt.estimators."""
 import numpy as np
-from mobility_rt.config import R_MIN_WINDOW_INCIDENCE, R_PRIOR_RATE, R_PRIOR_SHAPE
+from mobility_rt.config import R_MIN_WINDOW_CASES, R_PRIOR_RATE, R_PRIOR_SHAPE
 from mobility_rt.kernel import R_outward, R_system
+
+# Sliding-window width shared by every estimator here.  error_tables.ESTIMATOR_WINDOW
+# must match it; a test asserts they do.
+WINDOW = 7
 
 
 def estimate_R_independent(incidence, gen_time, window=7):
@@ -13,8 +17,11 @@ def estimate_R_independent(incidence, gen_time, window=7):
     with Λ_j(s) = Σ_{a=1}^{max_s-1} p(a) I_j(s-a)  [total infectiousness at day s].
     gen_time is 0-indexed and lag a is weighted by gen_time[a] = p(a), matching the
     forward simulator's force of infection (E_pde[:,:,1:] @ infect_profile[1:]).
-    R̂ is reported only where the windowed incidence ≥ R_MIN_WINDOW_INCIDENCE (else NaN),
-    so the estimate is data-driven rather than the prior mean.
+
+    R̂ is returned only where the window holds at least R_MIN_WINDOW_CASES = 1 case,
+    the smallest observable count (see mobility_rt.config for why one and not more).
+    The `lam > 1e-4` test is a separate numerical guard against dividing by an
+    essentially empty infectious history.
     """
     T, N   = incidence.shape
     max_s  = len(gen_time)
@@ -29,7 +36,7 @@ def estimate_R_independent(incidence, gen_time, window=7):
                 for a in range(1, max_s):
                     if tw - a >= 0:
                         lam += gen_time[a] * incidence[tw - a, j]
-            if lam > 1e-4 and obs >= R_MIN_WINDOW_INCIDENCE:
+            if lam > 1e-4 and obs >= R_MIN_WINDOW_CASES:
                 R_est[t, j] = (pa + obs) / (pb + lam)
     return R_est
 
@@ -38,12 +45,13 @@ def compute_naive_R_aggregate(incidence_total, gen_time_pmf, window=7):
     """Sliding-window independent estimator applied to aggregate (network-total) incidence.
 
     Treats the entire network as one homogeneous location, using the same Cori/EpiEstim
-    prior and reporting threshold as estimate_R_independent:
+    prior, window and observability floor as estimate_R_independent:
       R̂(t) = (R_PRIOR_SHAPE + Σ_{s∈W} I(s)) / (R_PRIOR_RATE + Σ_{s∈W} Λ(s))
     where W = [t-window+1, t] and Λ(s) = Σ_{a=1}^{max_s-1} p(a) I(s-a).
     Lag a is weighted by gen_time_pmf[a] = p(a), matching the forward simulator's
     generation interval (so any residual bias is spatial, not a GT-alignment artefact).
-    Returns R̂[T] (nan where the windowed incidence < R_MIN_WINDOW_INCIDENCE).
+    Same one-case observability floor as estimate_R_independent.
+    Returns R̂[T] (nan where the window holds less than one case).
     """
     T      = len(incidence_total)
     max_s  = len(gen_time_pmf)
@@ -51,14 +59,14 @@ def compute_naive_R_aggregate(incidence_total, gen_time_pmf, window=7):
     R_naive = np.full(T, np.nan)
     for t in range(window, T):
         t0    = max(0, t - window + 1)
-        obs   = incidence_total[t0:t + 1].sum()
-        denom = pb
-        for tw in range(t0, t + 1):
-            for a in range(1, max_s):
+        obs = incidence_total[t0:t + 1].sum()
+        lam = 0.0                      # accumulated WITHOUT the prior rate, so the
+        for tw in range(t0, t + 1):    # guard below tests the same quantity that
+            for a in range(1, max_s):  # estimate_R_independent tests, exactly
                 if tw - a >= 0:
-                    denom += gen_time_pmf[a] * incidence_total[tw - a]
-        if obs >= R_MIN_WINDOW_INCIDENCE and denom > 1e-4:
-            R_naive[t] = (pa + obs) / denom
+                    lam += gen_time_pmf[a] * incidence_total[tw - a]
+        if lam > 1e-4 and obs >= R_MIN_WINDOW_CASES:
+            R_naive[t] = (pa + obs) / (pb + lam)
     return R_naive
 
 
@@ -70,6 +78,11 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
       ind_iw, ind_pw, ind_Rw, ind_am   (Part 1: per-loc independent R, then aggregated)
       out_iw, out_pw, out_Rw, out_am   (Part 2: R^j_out, then aggregated)
       agg                               (Part 3: sliding-window R on total incidence)
+
+    Nine series in all: four weightings of the per-location independent estimates,
+    the same four weightings of the model's outward reproduction numbers, and the
+    single aggregate-incidence estimate.  Every one is a candidate network-level
+    summary to be compared with the true rho(R(t)).
     """
     inc    = sim["incidence"]          # (T, N)
     R_mats = sim["R_matrices"]
@@ -87,44 +100,35 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
         for t in range(T_len)])
 
     # ── Part 3: aggregate independent R on total incidence ───────────────
-    agg = compute_naive_R_aggregate(inc_tot, gen_time_pmf, window=7)
+    agg = compute_naive_R_aggregate(inc_tot, gen_time_pmf, window=WINDOW)
 
     # ── Per-location independent R estimates R_loc[t, j] ─────────────────
-    # Same Cori/EpiEstim prior + windowed-incidence reporting threshold as
-    # estimate_R_independent / compute_naive_R_aggregate.
-    max_s = len(gen_time_pmf); pa, pb = R_PRIOR_SHAPE, R_PRIOR_RATE; window = 7
-    R_loc = np.full((T_len, N), np.nan)
-    for j in range(N):
-        for t in range(window, T_len):
-            t0    = max(0, t - window + 1)
-            obs   = inc[t0:t + 1, j].sum()
-            denom = pb
-            for tw in range(t0, t + 1):
-                for a in range(1, max_s):
-                    if tw - a >= 0:
-                        denom += gen_time_pmf[a] * inc[tw - a, j]
-            if obs >= R_MIN_WINDOW_INCIDENCE and denom > 1e-4:
-                R_loc[t, j] = (pa + obs) / denom
+    # Delegated to estimate_R_independent rather than re-implemented, so a second
+    # definition of the same estimator cannot drift into existence.
+    R_loc = estimate_R_independent(inc, gen_time_pmf, window=WINDOW)
 
     # ── Part 1: per-location independent R, then aggregated ──────────────
+    # A network aggregate is reported only when EVERY location has an estimate.
+    # Averaging over whichever locations happen to be defined would make the
+    # aggregate's composition change from day to day, so differences between the
+    # weighting schemes would partly reflect which locations were in the average
+    # rather than how they were weighted.  All four weightings therefore share one
+    # validity rule and are defined on exactly the same days.
     ind_iw = np.full(T_len, np.nan)
     ind_pw = np.full(T_len, np.nan)
     ind_Rw = np.full(T_len, np.nan)
     ind_am = np.full(T_len, np.nan)
 
     for t in range(T_len):
-        vj = ~np.isnan(R_loc[t])
-        if not vj.any():
+        if np.isnan(R_loc[t]).any():
             continue
-        Rv = R_loc[t, vj]
-        Iv = inc[t, vj]
-        pv = pops[vj]
+        Rv = R_loc[t]
+        Iv = inc[t]
         # i) incidence-weighted
         if Iv.sum() > 1e-6:
             ind_iw[t] = float(np.sum(Iv * Rv) / Iv.sum())
         # ii) population-weighted
-        wpv = pv / pv.sum()
-        ind_pw[t] = float(np.sum(wpv * Rv))
+        ind_pw[t] = float(np.sum(w_pop * Rv))
         # iii) relative-transmissibility (self-)weighted: weight each independent
         #      estimate R^ind_j by its OWN relative transmissibility
         #      w_j = R^ind_j / Σ_k R^ind_k  →  R^{ind,Rw} = Σ_j (R^ind_j)² / Σ_j R^ind_j
