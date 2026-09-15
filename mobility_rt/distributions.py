@@ -47,3 +47,19 @@ def discretise_gamma(mean, sd, max_days):
             f"discretise_gamma: all probability mass falls beyond max_days={max_days} "
             f"for Gamma(mean={mean}, sd={sd}); increase max_days.")
     return pmf / total
+
+
+def renewal_gt(p):
+    """The generation-time distribution the renewal model actually runs on.
+
+    Every reproduction number, kernel normalisation and force of infection in the
+    model integrates the infectiousness profile over a_E >= 1 (there is no same-day
+    transmission), so the generation time is p(a_E) with the a_E = 0 entry set to
+    zero and renormalised: g(a_E) = p(a_E) / Σ_{a>=1} p(a) for a_E >= 1, g(0) = 0.
+    """
+    g = np.asarray(p, dtype=float).copy()
+    g[0] = 0.0
+    total = g.sum()
+    if not total > 0.0:
+        raise ValueError("the profile carries no mass at ages a_E >= 1")
+    return g / total

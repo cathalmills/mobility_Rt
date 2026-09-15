@@ -20,16 +20,14 @@ from mobility_rt import (
     sensitivity_elasticity,
     compute_generation_times,
     eigenvector_weighted_gt,
-    within_between_decomposition,
     reactivity,
     amplification_envelope,
-    convergence_cosine,
     euler_lotka_r,
     simulate_epidemic_pde,
     estimate_R_independent,
     type_reproduction_number,
     type_reproduction_numbers,
-    _compute_power_mean_spectrum,
+    lehmer_mean_spectrum,
     R_PRIOR_SHAPE,
     R_PRIOR_RATE,
     COVID_PARAMS,
@@ -59,14 +57,12 @@ class TestMobilityRt(unittest.TestCase):
         gen_time_pmf   = discretise_gamma(
             params["gen_time_mean"], params["gen_time_sd"], max_days)
         infect_profile = gen_time_pmf.copy()
-        w_within  = discretise_gamma(4.0, 1.5, max_days)
-        w_between = discretise_gamma(7.0, 2.5, max_days)
 
         city_data = generate_city(N, scenario="lagos", seed=SEED)
         coords, pops, dists, node_types, meta = city_data
 
         f_jk, base_f = generate_mobility(
-            N, T, pops, dists, node_types, meta,
+            N, T, pops, dists, meta,
             day_variation_sd=0.15, seed=SEED)
 
         initial = np.zeros(N);  initial[0] = 5
@@ -76,9 +72,7 @@ class TestMobilityRt(unittest.TestCase):
             params["R0_target"], initial,
             params["base_contact_rate"],
             params["base_contact_rate"] * 0.30,
-            w_within, w_between,
-            birth_rate=0.00003, death_rate=0.00003,
-            stochastic=False, susceptible_depletion=True, seed=SEED)
+            f_calibration=base_f)
 
         cls.N            = N
         cls.T            = T
@@ -87,8 +81,6 @@ class TestMobilityRt(unittest.TestCase):
         cls.max_days     = max_days
         cls.gen_time_pmf = gen_time_pmf
         cls.infect_profile = infect_profile
-        cls.w_within  = w_within
-        cls.w_between = w_between
         cls.city_data    = city_data
         cls.coords       = coords
         cls.pops         = pops
@@ -102,7 +94,7 @@ class TestMobilityRt(unittest.TestCase):
         cls.lb           = sim["lambda_between_scaled"]
         cls.inc          = sim["incidence"]
         cls.R_matrices   = sim["R_matrices"]
-        cls.S_series     = sim["susceptibles"]
+        cls.S_series     = sim["S_start"]
 
         inc_total = cls.inc.sum(axis=1)
         cls.peak  = int(np.argmax(inc_total))
@@ -123,7 +115,7 @@ class TestMobilityRt(unittest.TestCase):
         # Lagos
         city_L = generate_city(N, scenario="lagos", seed=SEED)
         coords_L, pops_L, dists_L, types_L, meta_L = city_L
-        f_L, _ = generate_mobility(N, T, pops_L, dists_L, types_L, meta_L,
+        f_L, _ = generate_mobility(N, T, pops_L, dists_L, meta_L,
                                    day_variation_sd=0.15, seed=SEED)
         row_sums_L = f_L.sum(axis=-1)
         np.testing.assert_allclose(
@@ -134,7 +126,7 @@ class TestMobilityRt(unittest.TestCase):
         # Zambia
         city_Z = generate_city(N, scenario="zambia", seed=SEED)
         coords_Z, pops_Z, dists_Z, types_Z, meta_Z = city_Z
-        f_Z, _ = generate_mobility(N, T, pops_Z, dists_Z, types_Z, meta_Z,
+        f_Z, _ = generate_mobility(N, T, pops_Z, dists_Z, meta_Z,
                                    day_variation_sd=0.12, seed=SEED)
         row_sums_Z = f_Z.sum(axis=-1)
         np.testing.assert_allclose(
@@ -362,6 +354,33 @@ class TestMobilityRt(unittest.TestCase):
             residual_low, 0.0, places=6,
             msg=f"Euler-Lotka residual={residual_low:.2e} for rho=0.5")
 
+    def test_euler_lotka_reference_values_and_no_silent_except(self):
+        """F18: known roots for the model pmf; NaN (not an exception) when the root lies
+        outside the bracket |r| <= 2 per day; and no exception handler that could turn
+        a solver failure into a silent NaN."""
+        import inspect
+        p = discretise_gamma(5.5, 1.8, 25)
+        self.assertTrue(np.isnan(euler_lotka_r(1e4, p)))
+        self.assertAlmostEqual(euler_lotka_r(1.5, p), 0.07543477, places=8)
+        self.assertAlmostEqual(euler_lotka_r(1.5384, p), 0.08025335, places=8)
+        self.assertNotIn("except", inspect.getsource(euler_lotka_r))
+
+    def test_importing_the_package_leaves_warning_filters_unchanged(self):
+        """F15: importing mobility_rt must not silence warnings process-wide.
+
+        The filter list is emptied first: the package is already imported by the time
+        this runs, and re-adding an identical "ignore" filter would leave a non-empty
+        list unchanged, so comparing against the current list could not fail."""
+        import importlib
+        import warnings
+        import mobility_rt
+        with warnings.catch_warnings():
+            warnings.resetwarnings()
+            importlib.reload(mobility_rt)
+            after = list(warnings.filters)
+        self.assertEqual(after, [],
+                         "importing mobility_rt changed the global warning filters")
+
     # -----------------------------------------------------------------------
     # 8. Source-sink conservation
     # -----------------------------------------------------------------------
@@ -383,59 +402,6 @@ class TestMobilityRt(unittest.TestCase):
             self.assertAlmostEqual(
                 R_out.sum(), R_in.sum(), places=12,
                 msg="sum(R_outward) != sum(R_inward)")
-
-    # -----------------------------------------------------------------------
-    # 9. Within-between decomposition
-    # -----------------------------------------------------------------------
-
-    def test_within_between_decomposition(self):
-        """pi_within + pi_between == 1; diagonal -> 1.0; off-diagonal only -> 0.0."""
-        rng   = np.random.default_rng(13)
-        R_mat = rng.uniform(0.1, 2.0, (4, 4))
-        res   = within_between_decomposition(R_mat)
-        self.assertAlmostEqual(
-            res["pi_within"] + res["pi_between"], 1.0, places=12,
-            msg="pi_within + pi_between != 1")
-
-        # Diagonal R_mat -> pi_within = 1
-        D     = np.diag([1.0, 2.0, 3.0, 0.5])
-        res_D = within_between_decomposition(D)
-        self.assertAlmostEqual(res_D["pi_within"], 1.0, places=12,
-                               msg="Diagonal R_mat: pi_within != 1")
-
-        # Zero-diagonal R_mat -> pi_within = 0
-        ZD = np.array([[0, 1, 0, 1],
-                       [1, 0, 1, 0],
-                       [0, 1, 0, 1],
-                       [1, 0, 1, 0]], dtype=float)
-        res_ZD = within_between_decomposition(ZD)
-        self.assertAlmostEqual(res_ZD["pi_within"], 0.0, places=12,
-                               msg="Zero-diagonal R_mat: pi_within != 0")
-
-    # -----------------------------------------------------------------------
-    # 10. Convergence cosine == 1 when incidence proportional to stable dist.
-    # -----------------------------------------------------------------------
-
-    def test_convergence_cosine_uses_stable_distribution(self):
-        """cos ~= 1 when incidence is proportional to stable_distribution."""
-        R_test = np.array([[2.0, 1.0, 0.5],
-                           [0.3, 1.5, 0.2],
-                           [0.1, 0.4, 1.2]])
-
-        spec   = spectral_analysis(R_test)
-        stable = spec["stable_distribution"]       # already sum-to-one
-        stable = stable / (stable.sum() + 1e-300)
-
-        T_mock     = 5
-        incidence  = np.tile(stable * 1000.0, (T_mock, 1))
-        R_matrices = np.tile(R_test, (T_mock, 1, 1))
-
-        cs = convergence_cosine(incidence, R_matrices)
-        for t in range(T_mock):
-            if not np.isnan(cs[t]):
-                self.assertAlmostEqual(
-                    cs[t], 1.0, places=8,
-                    msg=f"convergence_cosine[{t}]={cs[t]:.10f} != 1")
 
     # -----------------------------------------------------------------------
     # 11. Reactivity sigma >= 0 and sigma == rho for symmetric matrices
@@ -549,7 +515,7 @@ class TestMobilityRt(unittest.TestCase):
         city  = generate_city(N, scenario="lagos", seed=123)
         coords, pops, dists, node_types, meta = city
         # day_variation_sd=0.0 so lognormal noise is exactly 1.0 (exp(0))
-        f_jk, _ = generate_mobility(N, T, pops, dists, node_types, meta,
+        f_jk, _ = generate_mobility(N, T, pops, dists, meta,
                                     day_variation_sd=0.0, seed=0)
 
         # away fraction for j at t = 1 - f_jk[t, j, j]
@@ -901,579 +867,33 @@ class TestMobilityRt(unittest.TestCase):
                     checked += 1
         self.assertGreater(checked, 0)
 
-    def test_power_mean_limits(self):
+    def test_lehmer_mean_limits(self):
         """X(0)=arithmetic mean, X(α→∞)→max of R^j_out (Eq 41 limits), X(1)=E(t)."""
         # Well-separated values (max ratio ≥ 2) so the α→∞ limit converges fast.
         R_out = np.array([[0.5, 1.0, 2.0],
                           [1.0, 1.5, 3.0]])            # (T=2, N=3)
-        X = _compute_power_mean_spectrum(R_out, np.array([0.0, 1.0, 80.0]))
+        X = lehmer_mean_spectrum(R_out, np.array([0.0, 1.0, 80.0]))
         np.testing.assert_allclose(X[0], R_out.mean(axis=1), atol=1e-9)          # arith mean
         E_t = (R_out ** 2).sum(axis=1) / R_out.sum(axis=1)
         np.testing.assert_allclose(X[1], E_t, atol=1e-9)                          # α=1 → E(t)
         np.testing.assert_allclose(X[2], R_out.max(axis=1), atol=1e-6)           # α→∞ → max
         # monotone non-decreasing in α
-        Xs = _compute_power_mean_spectrum(R_out, np.array([0.0, 1.0, 2.0, 5.0]))
+        Xs = lehmer_mean_spectrum(R_out, np.array([0.0, 1.0, 2.0, 5.0]))
         self.assertTrue(np.all(np.diff(Xs, axis=0) >= -1e-9))
 
     def test_row_stochastic_under_stress(self):
-        """Mobility rows sum to 1 under hub amplification and commuting-fraction scaling."""
+        """Mobility rows sum to 1 under strong hub amplification."""
         for N in (4, 10, 15):
             city = generate_city(N, "lagos", seed=3)
             _, pops, dists, types, meta = city
-            f, base = generate_mobility(N, 30, pops, dists, types, meta,
-                                        seed=3, commuting_frac_scale=1.2,
-                                        hub_attraction_power=8.0)
+            f, base = generate_mobility(N, 30, pops, dists, meta,
+                                        seed=3, hub_attraction_power=8.0)
             self.assertTrue(np.allclose(f.sum(axis=-1), 1.0, atol=1e-9),
                             msg=f"rows not stochastic (N={N}, hub_power=8)")
 
     def test_type_R_single_location(self):
         """type_reproduction_number does not crash for N=1 (returns R_jj)."""
         self.assertAlmostEqual(type_reproduction_number(np.array([[0.7]]), 0), 0.7, places=10)
-
-# ---------------------------------------------------------------------------
-# The single manuscript table, and LaTeX validity of every generated table
-# ---------------------------------------------------------------------------
-
-from mobility_rt.combined_table import (
-    _LOCATION_ROWS,
-    PERIOD,
-    compute_combined_table,
-    write_combined_table,
-)
-
-
-def _tex_structure_errors(text, n_data_cols=None):
-    """Structural problems in a generated LaTeX table: unbalanced braces or math,
-    and rows whose cell count does not match the tabular preamble.
-
-    The expected column count is read from the preamble itself when not given, so
-    the check cannot be wrong about the table it is checking."""
-    import re as _re
-    errs = []
-    if n_data_cols is None:
-        m = _re.search(r"\\begin\{tabular\}\{([^}]*)\}", text)
-        if not m:
-            return ["no tabular preamble found"]
-        n_data_cols = sum(1 for ch in m.group(1) if ch in "lcr")
-    body = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("%"))
-    if body.count("{") != body.count("}"):
-        errs.append(f"unbalanced braces: {body.count('{')} open, "
-                    f"{body.count('}')} close")
-    if body.count("$") % 2:
-        errs.append("odd number of $ delimiters")
-    for env in ("table", "tabular"):
-        if body.count("\\begin{" + env + "}") != body.count("\\end{" + env + "}"):
-            errs.append(f"{env} not closed")
-    for line in body.split("\n"):
-        t = line.strip()
-        if not t.endswith("\\\\") or "multicolumn" in t:
-            continue
-        if t.count("&") != n_data_cols - 1:
-            errs.append(f"row has {t.count('&') + 1} cells, "
-                        f"expected {n_data_cols}: {t[:48]}")
-    return errs
-
-
-class TestCombinedManuscriptTable(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        cls.N, cls.T = 6, 260
-        params = COVID_PARAMS
-        cls.gt = discretise_gamma(params["gen_time_mean"], params["gen_time_sd"],
-                                  params["max_gen_time"])
-        cls.city = generate_city(cls.N, scenario="lagos", seed=6)
-        f = generate_mobility(cls.N, cls.T, cls.city[1], cls.city[2],
-                              cls.city[3], cls.city[4], seed=6)[0]
-        init = np.zeros(cls.N); init[0] = 10.0
-        LW = params["base_contact_rate"]
-        cls.sim = simulate_epidemic_pde(
-            cls.T, cls.N, cls.city[1], f, params["prob_transmission_peak"], cls.gt,
-            params["max_gen_time"], params["R0_target"], init, LW, LW * 0.30,
-            cls.gt, cls.gt, birth_rate=3e-5, death_rate=3e-5, seed=6)
-        cls.scen = [("One", cls.sim, cls.city), ("Two", cls.sim, cls.city)]
-        cls.table = compute_combined_table(cls.scen, cls.gt)
-
-    def test_values_are_lifted_unchanged_from_the_sources(self):
-        """Nothing may be recomputed: every cell must equal its source table."""
-        net = compute_error_table(self.scen, self.gt)
-        loc = compute_location_table(self.scen, self.gt)
-        diag = compute_diagnostics_table(self.scen, self.gt)
-        for lab in ("One", "Two"):
-            for sch in SCHEMES:
-                mre, bias = self.table["network"][sch.key][lab]
-                self.assertAlmostEqual(mre, net[PERIOD]["mre"][sch.key][lab], places=12)
-                self.assertAlmostEqual(bias, net[PERIOD]["bias"][sch.key][lab],
-                                       places=12)
-            for key, source, _, _, _ in _LOCATION_ROWS:
-                want = (diag[lab][key] if source == "diag"
-                        else float(np.median(loc[lab][key]["mre"])))
-                self.assertAlmostEqual(self.table["location"][key][lab], want,
-                                       places=12)
-            self.assertEqual(self.table["n_days"][lab], net[PERIOD]["n_days"][lab])
-
-    def test_refuses_when_the_halves_used_different_days(self):
-        """The whole point of one table is one day set; a mismatch must be fatal."""
-        import copy
-        net = compute_error_table(self.scen, self.gt)
-        loc = compute_location_table(self.scen, self.gt)
-        diag = compute_diagnostics_table(self.scen, self.gt)
-        bad = copy.deepcopy(diag)
-        bad["One"]["n_days"] += 1
-        with self.assertRaises(ValueError):
-            compute_combined_table(self.scen, self.gt, net, loc, bad)
-
-    def test_refuses_mismatched_scenarios(self):
-        net = compute_error_table(self.scen, self.gt)
-        loc = compute_location_table(self.scen, self.gt)
-        diag = compute_diagnostics_table([("One", self.sim, self.city)], self.gt)
-        with self.assertRaises(ValueError):
-            compute_combined_table(self.scen, self.gt, net, loc, diag)
-        with self.assertRaises(ValueError):
-            compute_combined_table([], self.gt)
-        with self.assertRaises(ValueError):
-            compute_combined_table([("X", self.sim, self.city),
-                                    ("X", self.sim, self.city)], self.gt)
-
-    def test_files_written_and_well_formed(self):
-        with _tempfile.TemporaryDirectory() as d:
-            paths = write_combined_table(self.table, d, prefix="mt")
-            self.assertEqual(len(paths), 2)
-            rows = list(_csv.reader(open(_os.path.join(d, "mt.csv"))))
-            self.assertEqual(len({len(r) for r in rows}), 1)
-            self.assertEqual(len(rows),
-                             1 + 2 * len(SCHEMES) + len(_LOCATION_ROWS) + 1)
-            self.assertEqual(rows[-1][1], "Days used")
-            for r in rows[1:-1]:
-                for c in r[4:]:
-                    float(c)
-                self.assertNotIn("\\", r[1])
-            tex = open(_os.path.join(d, "mt.tex")).read()
-            errs = _tex_structure_errors(tex)
-            self.assertEqual(errs, [], f"LaTeX problems: {errs}")
-
-    def test_every_generated_tex_table_is_structurally_valid(self):
-        """Guards all four writers at once, including the brace balance that a
-        mixed f-string / plain-string literal silently breaks."""
-        from mobility_rt import error_tables as _et, location_errors as _le
-        with _tempfile.TemporaryDirectory() as d:
-            n = len(self.table["labels"])
-            net = compute_error_table(self.scen, self.gt)
-            loc = compute_location_table(self.scen, self.gt)
-            diag = compute_diagnostics_table(self.scen, self.gt)
-            written = []
-            written += _et.write_error_tables(net, d, prefix="e")
-            written += _le.write_location_table(loc, d, prefix="l")
-            written += _le.write_diagnostics_table(diag, d, prefix="g")
-            written += write_combined_table(self.table, d, prefix="m")
-            tex_files = [p for p in written if p.endswith(".tex")]
-            self.assertEqual(len(tex_files), 5)   # growth, full, loc, diag, combined
-            for path in tex_files:
-                body = open(path).read()
-                errs = _tex_structure_errors(body)
-                self.assertEqual(errs, [], f"{_os.path.basename(path)}: {errs}")
-                # and the preamble must actually match the scenario count
-                import re
-                pre = re.search(r"\\begin\{tabular\}\{([^}]*)\}", body).group(1)
-                self.assertEqual(sum(1 for c in pre if c == "r"), n,
-                                 f"{_os.path.basename(path)}: wrong number of "
-                                 f"numeric columns for {n} scenarios")
-
-
-
-# ---------------------------------------------------------------------------
-# Framework <-> core parity
-# ---------------------------------------------------------------------------
-#
-# mobility_rt.framework carries its own copy of most of the core math, because it is
-# the self-contained general-purpose API (the one documented in the README's "Using
-# your own data" section and used by the notebooks).  Duplication is the deliberate
-# cost of that self-containment; silent DRIFT between the two copies is the thing
-# that must never happen, and it is the failure mode behind the earlier GT and
-# estimator bugs.
-#
-# _FW_DUPLICATES pins every framework function that re-implements core math to the
-# core callable it must agree with, and every entry has a numerical parity test
-# below.  _FW_ONLY lists the framework functions with no core counterpart.
-# test_every_framework_function_is_accounted_for fails when a function appears in
-# neither, so a NEW duplicate cannot be introduced without a deliberate decision
-# about how it is guarded.
-#
-# ARGUMENT MAPPING.  The two copies are the same equations with different
-# signatures, and the differences are the trap:
-#
-#   core                                               framework
-#   ----------------------------------------------     -------------------------
-#   compute_R_matrix(f, S, pops, prob_peak, p, lw, lb)  (f, S, pops, p, lw, lb)
-#   compute_R_meeting(f, S, pops, prob_peak, p, lw, lb) R_meeting(f, S, pops, p, lw, lb)
-#   compute_generation_times(..., prob_peak, p, max_days, lw, lb)  (..., p, lw, lb)
-#   simulate_epidemic_pde(T, N, pops, f, prob_peak, p, max_days, R0, seed, lw, lb)
-#                                                       simulate_epidemic(f, pops, p,
-#                                                       lw, lb, R0, seed, T)
-#
-# The framework has no prob_peak argument: beta is folded into lw/lb instead, which
-# is the same thing because beta enters R multiplicatively.  So every core call
-# below passes prob_peak=1.0, and test_beta_may_be_folded_into_either_place pins
-# that equivalence.  The framework also drops max_days (it uses len(p)) and the
-# contact_mult/infect_mult heterogeneity multipliers (it has none, so core is
-# called with the default None).
-
-import mobility_rt.framework as _fw
-from mobility_rt import estimators as _core_est
-from mobility_rt import generation_time as _core_gt
-from mobility_rt import kernel as _core_kernel
-from mobility_rt import simulation as _core_sim
-from mobility_rt import spectral as _core_spectral
-from mobility_rt import transmissibility as _core_trans
-from mobility_rt import type_reproduction as _core_type
-
-_FW_DUPLICATES = {
-    # framework attribute            core callable it must match
-    "_kernel_base":                 _core_kernel._kernel_base,
-    "compute_R_matrix":             _core_kernel.compute_R_matrix,
-    "R_outward":                    _core_kernel.R_outward,
-    "R_inward":                     _core_kernel.R_inward,
-    "R_network":                    _core_kernel.R_system,
-    "R_meeting":                    _core_kernel.compute_R_meeting,
-    "_perron_real":                 _core_spectral._perron_real,
-    "spectral_analysis":            _core_spectral.spectral_analysis,
-    "sensitivity_elasticity":       _core_spectral.sensitivity_elasticity,
-    "amplification_envelope":       _core_spectral.amplification_envelope,
-    "type_R_number":                _core_type.type_reproduction_number,
-    "type_R_all":                   _core_type.type_reproduction_numbers,
-    "group_type_R":                 _core_type.type_reproduction_number_group,
-    "compute_generation_times":     _core_gt.compute_generation_times,
-    "estimate_R_independent":       _core_est.estimate_R_independent,
-    "euler_lotka_r":                _core_trans.euler_lotka_r,
-    "empirical_growth_rate":        _core_trans.empirical_growth_rate,
-    "source_sink_analysis":         _core_trans.source_sink_analysis,
-    "effective_populations_series": _core_sim.compute_effective_populations_series,
-    "simulate_epidemic":            _core_sim.simulate_epidemic_pde,
-}
-
-_FW_ONLY = frozenset({
-    "validate_inputs",                 # input checking, framework-specific
-    "compute_R0_from_beta",            # beta -> R0 map, no core equivalent
-    "estimate_beta_from_growth_rate",  # the one data-anchored entry point
-    "scan_beta_to_R0",
-    "parameter_sweep",
-    "build_synthetic_network",
-    "_scale_commuting",
-    "run_all_tests",                   # the framework's own self-check harness
-    # E_risk_averse has no core FUNCTION, but the core computes the same quantity
-    # inline as E_t in estimators._compute_naive_suite; pinned by
-    # test_E_risk_averse_matches_the_inline_core_formula.
-    "E_risk_averse",
-})
-
-
-class TestFrameworkCoreConsistency(unittest.TestCase):
-    """Guard: MobilityRtFramework and the core must compute IDENTICAL math.
-
-    This institutionalises the single-source-of-truth.  If the framework's math ever
-    drifts from the package core, one of these assertions fails.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        """One valid, fully-positive scenario shared by every parity test.
-
-        Valid matters: the two copies differ in defensive clamping (the framework
-        clamps the away-meeting term in R_meeting, the core does not), so parity is
-        asserted on the documented input domain -- a row-stochastic f with positive
-        populations and susceptibles -- where the clamps are inert and the two are
-        genuinely the same function.
-        """
-        rng = np.random.default_rng(20260913)
-        cls.N, cls.T = 5, 60
-        W = rng.uniform(0.01, 1.0, (cls.N, cls.N))
-        np.fill_diagonal(W, rng.uniform(4.0, 9.0, cls.N))   # home-dominant rows
-        cls.f        = W / W.sum(axis=1, keepdims=True)
-        cls.f_series = np.tile(cls.f, (cls.T, 1, 1))
-        cls.pops     = rng.uniform(5e4, 9e5, cls.N)
-        cls.S        = cls.pops * rng.uniform(0.3, 1.0, cls.N)
-        cls.p        = discretise_gamma(5.5, 1.8, 20)
-        cls.lw, cls.lb = 13.0, 3.9
-        cls.inc      = rng.poisson(25, (cls.T, cls.N)).astype(float)
-        cls.R        = compute_R_matrix(cls.f, cls.S, cls.pops, 1.0,
-                                        cls.p, cls.lw, cls.lb)
-
-    # ── helpers ───────────────────────────────────────────────────────────────
-
-    def _same(self, a, b, what, atol=1e-10):
-        np.testing.assert_allclose(a, b, rtol=0, atol=atol, equal_nan=True,
-                                   err_msg=f"framework and core disagree on {what}")
-
-    def _same_dicts(self, d_fw, d_core, what, expect_keys, atol=1e-10):
-        """Compare every key the two dicts share, and assert the shared set is the
-        expected one -- so a key silently disappearing from either side fails too."""
-        shared = sorted(set(d_fw) & set(d_core))
-        self.assertEqual(shared, sorted(expect_keys),
-                         f"{what}: the set of keys shared by framework and core "
-                         f"changed (got {shared})")
-        for k in shared:
-            if isinstance(d_fw[k], (bool, np.bool_)):
-                self.assertEqual(bool(d_fw[k]), bool(d_core[k]), f"{what}[{k}]")
-            else:
-                self._same(d_fw[k], d_core[k], f"{what}[{k}]", atol=atol)
-
-    # ── the registry itself ──────────────────────────────────────────────────
-
-    def test_every_framework_function_is_accounted_for(self):
-        """Every function the framework defines is either a pinned duplicate of core
-        math or explicitly framework-only.  A new function in neither set fails here,
-        which is the point: it forces the author to decide which it is."""
-        import inspect
-        defined = {n for n, o in vars(_fw).items()
-                   if inspect.isfunction(o) and o.__module__ == "mobility_rt.framework"}
-        unaccounted = defined - set(_FW_DUPLICATES) - _FW_ONLY
-        self.assertFalse(unaccounted,
-                         f"mobility_rt.framework defines {sorted(unaccounted)} with no "
-                         f"parity test and no _FW_ONLY entry. If it duplicates core "
-                         f"math, add it to _FW_DUPLICATES and write a parity test; "
-                         f"if it is framework-only, add it to _FW_ONLY.")
-        stale = (set(_FW_DUPLICATES) | _FW_ONLY) - defined
-        self.assertFalse(stale, f"registry lists functions the framework no longer "
-                                f"defines: {sorted(stale)}")
-
-    def test_every_registered_duplicate_has_a_parity_test(self):
-        """Registering a duplicate without testing it would be worse than useless."""
-        tested = {n for n in dir(self) if n.startswith("test_")}
-        # Each duplicate must be named in the source of at least one parity test.
-        import inspect
-        bodies = "\n".join(inspect.getsource(getattr(type(self), n)) for n in tested)
-        missing = [name for name in _FW_DUPLICATES if f'"{name}"' not in bodies
-                   and f"_fw.{name}" not in bodies]
-        self.assertFalse(missing, f"registered duplicates with no parity test: {missing}")
-
-    def test_discretise_gamma_is_shared(self):
-        # Deduped rather than duplicated: the framework re-imports the core function,
-        # so this is literally the same object and cannot drift at all.
-        self.assertIs(_fw.discretise_gamma, discretise_gamma)
-
-    # ── kernel ───────────────────────────────────────────────────────────────
-
-    def test_kernel_base_matches_core(self):
-        """The kernel is the one duplicate that was previously unguarded, and it is
-        the one everything else is built on."""
-        a = _fw._kernel_base(self.f, self.pops, self.lw, self.lb)
-        b = _core_kernel._kernel_base(self.f, self.pops, self.lw, self.lb)
-        self.assertEqual(len(a), 4)   # framework: base_K, within, between, N_eff
-        self.assertEqual(len(b), 5)   # core adds inv_Neff
-        for i, name in enumerate(["base_K", "K_within", "K_between", "N_eff"]):
-            self._same(a[i], b[i], f"_kernel_base[{name}]", atol=0.0)
-
-    def test_compute_R_matrix_matches_core(self):
-        """Core takes prob_peak as its FOURTH POSITIONAL argument; the framework has
-        no such argument.  They agree exactly when core is given prob_peak=1.0."""
-        self._same(_fw.compute_R_matrix(self.f, self.S, self.pops, self.p, self.lw, self.lb),
-                   compute_R_matrix(self.f, self.S, self.pops, 1.0, self.p, self.lw, self.lb),
-                   "compute_R_matrix", atol=0.0)
-
-    def test_beta_may_be_folded_into_either_place(self):
-        """beta in core's prob_peak == beta in the framework's lw/lb.  This is what
-        makes prob_peak=1.0 the correct translation, and it is the mistake the README
-        warns about: supplying beta in BOTH places scales every R by beta squared."""
-        beta = 0.037
-        via_prob_peak = compute_R_matrix(self.f, self.S, self.pops, beta,
-                                         self.p, self.lw, self.lb)
-        via_contact_rates = _fw.compute_R_matrix(self.f, self.S, self.pops, self.p,
-                                                 beta * self.lw, beta * self.lb)
-        self._same(via_prob_peak, via_contact_rates, "beta folding", atol=1e-12)
-        # and the double-application really is a beta^2 error, not a harmless one
-        doubled = compute_R_matrix(self.f, self.S, self.pops, beta, self.p,
-                                   beta * self.lw, beta * self.lb)
-        self._same(doubled, beta * via_prob_peak, "beta applied twice", atol=1e-12)
-
-    def test_R_summaries_match_core(self):
-        R_fw = _fw.compute_R_matrix(self.f, self.S, self.pops, self.p, self.lw, self.lb)
-        self._same(_fw.R_outward(R_fw), R_outward(self.R), "R_outward", atol=0.0)
-        self._same(_fw.R_inward(R_fw),  R_inward(self.R),  "R_inward",  atol=0.0)
-        self.assertEqual(_fw.R_network(R_fw), R_system(self.R))   # R_network == R_system
-
-    def test_R_meeting_matches_core(self):
-        self._same(_fw.R_meeting(self.f, self.S, self.pops, self.p, self.lw, self.lb),
-                   _core_kernel.compute_R_meeting(self.f, self.S, self.pops, 1.0,
-                                     self.p, self.lw, self.lb),
-                   "R_meeting")
-
-    # ── spectral ─────────────────────────────────────────────────────────────
-
-    def test_perron_real_matches_core(self):
-        rng = np.random.default_rng(101)
-        for _ in range(20):
-            M = rng.uniform(0.05, 2.0, (5, 5))
-            _, evec = np.linalg.eig(M)
-            for col in range(evec.shape[1]):
-                self._same(_fw._perron_real(evec[:, col]),
-                           _core_spectral._perron_real(evec[:, col]),
-                           "_perron_real", atol=0.0)
-
-    def test_spectral_analysis_matches_core(self):
-        rng = np.random.default_rng(1)
-        shared = ["damping_ratio", "eigenvalues", "lambda2", "left_eigvec",
-                  "mixing_ratio", "rho", "right_eigvec"]
-        for _ in range(10):
-            R = rng.uniform(0.05, 2.0, (6, 6))
-            self._same_dicts(_fw.spectral_analysis(R), spectral_analysis(R),
-                             "spectral_analysis", shared, atol=1e-9)
-
-    def test_framework_spectral_extras_match_their_core_functions(self):
-        """The framework folds sigma, the condition number and the spectral gap into
-        spectral_analysis; the core keeps them in reactivity() and
-        sensitivity_elasticity().  Same numbers, different homes."""
-        rng = np.random.default_rng(11)
-        for _ in range(50):
-            R  = rng.uniform(0.0, 2.0, (5, 5))
-            sf = _fw.spectral_analysis(R)
-            rc = reactivity(R)
-            se = sensitivity_elasticity(R)
-            sc = spectral_analysis(R)
-            self._same(sf["sigma"], rc["sigma"], "sigma vs core reactivity", atol=1e-12)
-            self._same(sf["amplification_ratio"], rc["amplification_ratio"],
-                       "amplification_ratio", atol=1e-12)
-            self.assertEqual(bool(sf["transient_possible"]),
-                             bool(rc["transient_possible"]),
-                             "the false-action-zone flag (sigma>1, rho<1) disagrees")
-            self._same(sf["condition_number"], se["condition_number"],
-                       "condition_number", atol=1e-9)
-            self._same(sf["spectral_gap"], sc["rho"] - sc["lambda2"],
-                       "spectral_gap", atol=1e-12)
-
-    def test_sensitivity_elasticity_matches_core(self):
-        rng = np.random.default_rng(12)
-        for _ in range(10):
-            R = rng.uniform(0.05, 2.0, (5, 5))
-            self._same_dicts(_fw.sensitivity_elasticity(R), sensitivity_elasticity(R),
-                             "sensitivity_elasticity",
-                             ["condition_number", "elasticity", "rho", "sensitivity"],
-                             atol=1e-9)
-
-    def test_amplification_envelope_matches_core(self):
-        rng = np.random.default_rng(13)
-        for _ in range(5):
-            R = rng.uniform(0.0, 1.2, (5, 5))
-            self._same_dicts(_fw.amplification_envelope(R, 20),
-                             amplification_envelope(R, 20),
-                             "amplification_envelope", ["A", "n", "rho", "rho_n"],
-                             atol=1e-9)
-
-    # ── type reproduction numbers ────────────────────────────────────────────
-
-    def test_type_R_matches_core(self):
-        rng = np.random.default_rng(3)
-        for _ in range(10):
-            R = rng.uniform(0.0, 0.5, (4, 4))
-            self._same(_fw.type_R_all(R), type_reproduction_numbers(R),
-                       "type_R_all", atol=1e-9)
-            for j in range(4):
-                self._same(_fw.type_R_number(R, j), type_reproduction_number(R, j),
-                           f"type_R_number[{j}]", atol=1e-9)
-            for P in ([0], [0, 2], [1, 2, 3]):
-                self._same(_fw.group_type_R(R, P),
-                           _core_type.type_reproduction_number_group(R, P),
-                           f"group_type_R{P}", atol=1e-9)
-
-    def test_type_R_agrees_where_it_is_undefined_too(self):
-        """T_j is infinite when the background subsystem is self-sustaining.  Both
-        copies must return the SAME non-finite value, not merely both be non-finite."""
-        R = np.array([[0.2, 0.1, 0.1],       # location 1 alone sustains the epidemic
-                      [0.1, 2.6, 0.1],
-                      [0.1, 0.1, 0.2]])
-        a, b = _fw.type_R_all(R), type_reproduction_numbers(R)
-        np.testing.assert_array_equal(np.isfinite(a), np.isfinite(b))
-        np.testing.assert_array_equal(np.isnan(a), np.isnan(b))
-        self._same(a, b, "type_R_all on a self-sustaining background")
-
-    # ── generation times ─────────────────────────────────────────────────────
-
-    def test_generation_times_match_core(self):
-        """Core takes prob_peak and max_days explicitly; the framework uses 1.0 and
-        len(p).  Every GT the two both produce must agree."""
-        g_fw = _fw.compute_generation_times(self.f, self.S, self.pops,
-                                            self.p, self.lw, self.lb)
-        g_c  = compute_generation_times(self.f, self.S, self.pops, 1.0, self.p,
-                                        len(self.p), self.lw, self.lb)
-        self._same_dicts(g_fw, g_c, "compute_generation_times",
-                         ["R_matrix", "R_meeting", "g_inward", "g_meeting",
-                          "g_network", "g_outward", "g_pairwise"])
-
-    # ── estimators, growth, transmissibility ────────────────────────────────
-
-    def test_estimate_R_independent_matches_core(self):
-        rng = np.random.default_rng(2)
-        inc = rng.poisson(20, (60, 4)).astype(float)
-        pmf = discretise_gamma(5.5, 1.8, 25)
-        self._same(_fw.estimate_R_independent(inc, pmf, 7),
-                   estimate_R_independent(inc, pmf, 7),
-                   "estimate_R_independent", atol=1e-9)
-
-    def test_euler_lotka_matches_core(self):
-        pmf = discretise_gamma(5.5, 1.8, 25)
-        for rho in (0.7, 1.0, 1.5, 2.5):
-            self._same(_fw.euler_lotka_r(rho, pmf), euler_lotka_r(rho, pmf),
-                       f"euler_lotka_r({rho})", atol=1e-9)
-
-    def test_empirical_growth_rate_matches_core(self):
-        self._same(_fw.empirical_growth_rate(self.inc, 3),
-                   _core_trans.empirical_growth_rate(self.inc, 3),
-                   "empirical_growth_rate", atol=1e-12)
-
-    def test_source_sink_matches_core(self):
-        self._same_dicts(_fw.source_sink_analysis(self.R),
-                         _core_trans.source_sink_analysis(self.R),
-                         "source_sink_analysis",
-                         ["R_inward", "R_outward", "net_export", "sinks", "sources"])
-
-    def test_effective_populations_series_matches_core(self):
-        """Framework infers max_days from len(p); core takes it explicitly."""
-        S_ser = np.tile(self.S, (self.T, 1))
-        a = _fw.effective_populations_series(self.f_series, S_ser, self.inc, self.p)
-        b = _core_sim.compute_effective_populations_series(
-            self.f_series, S_ser, self.inc, self.p, len(self.p))
-        for arr_fw, arr_core, name in zip(a, b, ["S_eff", "I_eff"]):
-            self._same(arr_fw, arr_core, f"effective_populations_series[{name}]",
-                       atol=1e-9)
-
-    def test_E_risk_averse_matches_the_inline_core_formula(self):
-        """E(t) = sum_j (R^j_out)^2 / sum_k R^k_out (Eq 42).  The core has no function
-        for it -- estimators._compute_naive_suite computes it inline as E_t -- so this
-        pins the framework against the formula that suite uses."""
-        Ro = R_outward(self.R)
-        self._same(_fw.E_risk_averse(self.R),
-                   float(np.sum(Ro ** 2) / (np.sum(Ro) + 1e-300)),
-                   "E_risk_averse", atol=1e-9)
-
-    # ── the simulators ───────────────────────────────────────────────────────
-
-    def test_simulators_are_bit_identical(self):
-        """The largest duplicate and the one that matters most: the manuscript
-        figures come out of simulate_epidemic_pde, while a user of the documented
-        MobilityRtFramework API gets simulate_epidemic.  If these two ever diverge,
-        the published results and the shipped tool stop being the same model.
-
-        atol=0: not 'close', identical.
-        """
-        seed0 = np.zeros(self.N); seed0[0] = 100.0
-        R0_target, max_days = 1.8, len(self.p)
-        a = _fw.simulate_epidemic(self.f_series, self.pops, self.p,
-                                  self.lw, self.lb, R0_target, seed0, self.T,
-                                  verbose=False)
-        b = simulate_epidemic_pde(self.T, self.N, self.pops, self.f_series,
-                                  1.0, self.p, max_days, R0_target, seed0,
-                                  self.lw, self.lb)
-        for key_fw, key_core in [("incidence", "incidence"),
-                                 ("susceptibles", "susceptibles"),
-                                 ("incidence_matrix", "incidence_matrix"),
-                                 ("R_pairwise", "R_matrices"),
-                                 ("R_meeting", "R_meeting_series"),
-                                 ("E_pde_state", "E_pde_state")]:
-            self._same(a[key_fw], b[key_core],
-                       f"simulator output {key_fw} vs {key_core}", atol=0.0)
-        # and the calibration landed on the same contact rates
-        self._same(a["lw"], b["lambda_within_scaled"],  "calibrated lw", atol=0.0)
-        self._same(a["lb"], b["lambda_between_scaled"], "calibrated lb", atol=0.0)
-
 
 
 # ---------------------------------------------------------------------------
@@ -1624,8 +1044,8 @@ class TestHeterogeneousSimulation(unittest.TestCase):
                                  cls.params["gen_time_sd"], cls.max_days)
         cls.city = generate_city(cls.N, scenario="lagos", seed=3)
         cls.pops = cls.city[1]
-        cls.f = generate_mobility(cls.N, cls.T, cls.pops, cls.city[2],
-                                  cls.city[3], cls.city[4], seed=3)[0]
+        cls.f, cls.base_f = generate_mobility(cls.N, cls.T, cls.pops, cls.city[2],
+                                              cls.city[4], seed=3)
         cls.init = np.zeros(cls.N); cls.init[0] = 10.0
         cls.LW = cls.params["base_contact_rate"]
         cls.LB = cls.LW * 0.30
@@ -1636,13 +1056,15 @@ class TestHeterogeneousSimulation(unittest.TestCase):
         return simulate_epidemic_pde(
             self.T, self.N, self.pops, self.f, self.params["prob_transmission_peak"],
             self.p, self.max_days, self.params["R0_target"], self.init,
-            self.LW, self.LB, self.p, self.p, birth_rate=3e-5, death_rate=3e-5,
-            stochastic=False, susceptible_depletion=True, seed=3, **kw)
+            self.LW, self.LB, f_calibration=self.base_f, **kw)
 
     def test_calibration_holds_under_heterogeneity(self):
         sim = self._sim(contact_mult=self.c, infect_mult=self.m)
-        self.assertAlmostEqual(R_system(sim["R_matrices"][0]),
-                               self.params["R0_target"], places=8)
+        R_cal = compute_R_matrix(self.base_f, self.pops, self.pops,
+                                 self.params["prob_transmission_peak"], self.p,
+                                 sim["lambda_within_scaled"],
+                                 sim["lambda_between_scaled"], self.c, self.m)
+        self.assertAlmostEqual(R_system(R_cal), self.params["R0_target"], places=8)
 
     def test_scalar_multipliers_are_absorbed_by_calibration(self):
         """Only RELATIVE variation matters: a common factor is rescaled away."""
@@ -1743,233 +1165,6 @@ class TestHeterogeneityParameters(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Per-location discrepancy of the independent estimate
-# ---------------------------------------------------------------------------
-
-from mobility_rt.location_errors import (
-    COMPARATORS,
-    _spearman,
-    compute_diagnostics_table,
-    compute_location_table,
-    location_diagnostics,
-    location_discrepancies,
-    write_diagnostics_table,
-    write_location_table,
-)
-
-
-class TestLocationDiscrepancy(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        cls.N, cls.T = 6, 260
-        params = COVID_PARAMS
-        cls.gt = discretise_gamma(params["gen_time_mean"], params["gen_time_sd"],
-                                  params["max_gen_time"])
-        cls.city = generate_city(cls.N, scenario="lagos", seed=6)
-        f = generate_mobility(cls.N, cls.T, cls.city[1], cls.city[2],
-                              cls.city[3], cls.city[4], seed=6)[0]
-        init = np.zeros(cls.N); init[0] = 10.0
-        LW = params["base_contact_rate"]
-        cls.sim = simulate_epidemic_pde(
-            cls.T, cls.N, cls.city[1], f, params["prob_transmission_peak"], cls.gt,
-            params["max_gen_time"], params["R0_target"], init, LW, LW * 0.30,
-            cls.gt, cls.gt, birth_rate=3e-5, death_rate=3e-5, seed=6)
-        cls.d = location_discrepancies(cls.sim, cls.gt)
-
-    def test_no_unused_parameters(self):
-        import inspect
-        sig = inspect.signature(location_discrepancies)
-        self.assertEqual(list(sig.parameters), ["sim", "gen_time_pmf"])
-        src = inspect.getsource(location_discrepancies)
-        for name in sig.parameters:
-            self.assertGreater(src.count(name), 1, f"{name} is never read")
-
-    def test_shapes_and_positivity(self):
-        for key, _, _ in COMPARATORS:
-            self.assertEqual(len(self.d[key]["mre"]), self.N)
-            self.assertEqual(len(self.d[key]["bias"]), self.N)
-            self.assertTrue(np.all(self.d[key]["mre"] >= 0.0))
-            self.assertTrue(np.all(np.isfinite(self.d[key]["mre"])))
-        self.assertGreater(self.d["n_days"], 0)
-
-    def test_mre_dominates_bias_per_location(self):
-        for key, _, _ in COMPARATORS:
-            self.assertTrue(np.all(self.d[key]["mre"] + 1e-9
-                                   >= np.abs(self.d[key]["bias"])),
-                            f"{key}: |bias| exceeds mean absolute error")
-
-    def test_recomputed_by_hand(self):
-        """Independent re-derivation of one comparator, including the matched
-        trailing-mean reference."""
-        from mobility_rt.kernel import R_outward, R_system
-        inc = self.sim["incidence"]
-        Rm = self.sim["R_matrices"]
-        T, N = inc.shape
-        rho = np.array([R_system(Rm[t]) for t in range(T)])
-        Ro = np.array([R_outward(Rm[t]) for t in range(T)])
-        Rh = estimate_R_independent(inc, self.gt, window=ESTIMATOR_WINDOW)
-        ref_net = trailing_mean(rho, ESTIMATOR_WINDOW)
-        ref_own = np.column_stack([trailing_mean(Ro[:, j], ESTIMATOR_WINDOW)
-                                   for j in range(N)])
-        days = (rho > 1.0) & ~np.isnan(Rh).any(axis=1)
-        days &= np.isfinite(ref_net) & (ref_net > RHO_FLOOR)
-        days &= (np.isfinite(ref_own) & (ref_own > RHO_FLOOR)).all(axis=1)
-        self.assertEqual(int(days.sum()), self.d["n_days"])
-        rel = (Rh[days] - ref_own[days]) / ref_own[days]
-        np.testing.assert_allclose(self.d["own"]["mre"],
-                                   np.mean(np.abs(rel), axis=0) * 100, rtol=1e-12)
-        rel_n = (Rh[days] - ref_net[days, None]) / ref_net[days, None]
-        np.testing.assert_allclose(self.d["net"]["mre"],
-                                   np.mean(np.abs(rel_n), axis=0) * 100, rtol=1e-12)
-
-    def test_estimate_is_closer_to_the_network_than_to_its_own_R_out(self):
-        """The finding the table exists to report, as a median statement."""
-        self.assertLess(np.median(self.d["net"]["mre"]),
-                        np.median(self.d["own"]["mre"]))
-
-    def test_duplicate_labels_and_empty_rejected(self):
-        with self.assertRaises(ValueError):
-            compute_location_table([], self.gt)
-        with self.assertRaises(ValueError):
-            compute_location_table([("X", self.sim, self.city),
-                                    ("X", self.sim, self.city)], self.gt)
-
-    def test_files_written_and_parseable(self):
-        tbl = compute_location_table([("One", self.sim, self.city)], self.gt)
-        with _tempfile.TemporaryDirectory() as d:
-            paths = write_location_table(tbl, d, prefix="loc")
-            self.assertEqual(len(paths), 2)
-            rows = list(_csv.reader(open(_os.path.join(d, "loc.csv"))))
-            self.assertEqual(len({len(r) for r in rows}), 1)
-            self.assertEqual(rows[-1][1], "days used")
-            for r in rows[1:-1]:
-                float(r[3])                       # every value numeric
-            tex = open(_os.path.join(d, "loc.tex")).read()
-            self.assertIn("booktabs", tex)
-            self.assertEqual(tex.count("\\begin{table}"), 1)
-
-    # -- diagnostics ------------------------------------------------------
-    def test_spearman_matches_scipy_and_handles_edges(self):
-        from scipy.stats import spearmanr
-        rng = np.random.default_rng(3)
-        for _ in range(8):
-            a, b = rng.normal(size=9), rng.normal(size=9)
-            self.assertAlmostEqual(_spearman(a, b), spearmanr(a, b).statistic,
-                                   places=12)
-        # ties get average ranks, matching scipy
-        t, u = np.array([1., 2., 2., 3.]), np.array([4., 3., 3., 1.])
-        self.assertAlmostEqual(_spearman(t, u), spearmanr(t, u).statistic, places=12)
-        # a flat input has an UNDEFINED correlation, not zero
-        self.assertTrue(np.isnan(_spearman(np.ones(5), np.arange(5.))))
-        with self.assertRaises(ValueError):
-            _spearman(np.ones(3), np.ones(4))
-
-    def test_diagnostics_ranges_are_sane(self):
-        d = location_diagnostics(self.sim, self.gt)
-        self.assertGreaterEqual(d["rank_q1"], -1.0)
-        self.assertLessEqual(d["rank_q3"], 1.0)
-        self.assertLessEqual(d["rank_q1"], d["rank_median"])
-        self.assertLessEqual(d["rank_median"], d["rank_q3"])
-        for k in ("agree_growth", "agree_own"):
-            self.assertGreaterEqual(d[k], 0.0)
-            self.assertLessEqual(d[k], 100.0)
-        for k in ("cv_est", "cv_true", "net_median"):
-            self.assertGreater(d[k], 0.0)
-        self.assertGreater(d["n_days"], 0)
-
-    def test_diagnostics_recomputed_by_hand(self):
-        from mobility_rt.kernel import R_outward, R_system
-        inc = self.sim["incidence"]; Rm = self.sim["R_matrices"]
-        T, N = inc.shape
-        rho = np.array([R_system(Rm[t]) for t in range(T)])
-        Ro = np.array([R_outward(Rm[t]) for t in range(T)])
-        Rh = estimate_R_independent(inc, self.gt, window=ESTIMATOR_WINDOW)
-        rn = trailing_mean(rho, ESTIMATOR_WINDOW)
-        ro = np.column_stack([trailing_mean(Ro[:, j], ESTIMATOR_WINDOW)
-                              for j in range(N)])
-        days = (rho > 1.0) & ~np.isnan(Rh).any(axis=1)
-        days &= np.isfinite(rn) & (rn > RHO_FLOOR)
-        days &= (np.isfinite(ro) & (ro > RHO_FLOOR)).all(axis=1)
-        d = location_diagnostics(self.sim, self.gt)
-        self.assertEqual(int(days.sum()), d["n_days"])
-        rs = np.array([_spearman(Rh[t], ro[t]) for t in np.where(days)[0]])
-        rs = rs[np.isfinite(rs)]
-        self.assertAlmostEqual(d["rank_median"], float(np.median(rs)), places=12)
-        self.assertAlmostEqual(
-            d["cv_true"],
-            float(np.median(ro[days].std(axis=1) / ro[days].mean(axis=1))) * 100,
-            places=10)
-        self.assertAlmostEqual(
-            d["agree_own"],
-            float(np.mean((Rh[days] > 1.0) == (ro[days] > 1.0)) * 100), places=10)
-
-    def test_both_entry_points_share_one_day_mask(self):
-        """The mask must live in exactly one place, or the two tables could end up
-        scored on different days without anything failing."""
-        import inspect
-        from mobility_rt import location_errors as _le
-        for fn in (_le.location_discrepancies, _le.location_diagnostics):
-            src = inspect.getsource(fn)
-            self.assertIn("_prepare(sim, gen_time_pmf)", src,
-                          f"{fn.__name__} does not use the shared preparation")
-            self.assertNotIn("days &=", src,
-                             f"{fn.__name__} rebuilds the day mask")
-        self.assertEqual(location_diagnostics(self.sim, self.gt)["n_days"],
-                         location_discrepancies(self.sim, self.gt)["n_days"])
-
-    def test_net_median_matches_the_discrepancy_module(self):
-        self.assertAlmostEqual(
-            location_diagnostics(self.sim, self.gt)["net_median"],
-            float(np.median(location_discrepancies(self.sim, self.gt)["net"]["mre"])),
-            places=12)
-
-    def test_growth_agreement_uses_two_complete_windows(self):
-        """The first two windows cannot be compared week on week, so they must be
-        excluded; including them would compare against an incomplete baseline."""
-        import inspect
-        src = inspect.getsource(location_diagnostics)
-        self.assertIn("2 * ESTIMATOR_WINDOW", src)
-
-    def test_diagnostics_files_written(self):
-        tbl = compute_diagnostics_table([("One", self.sim, self.city)], self.gt)
-        with _tempfile.TemporaryDirectory() as d:
-            paths = write_diagnostics_table(tbl, d, prefix="dg")
-            self.assertEqual(len(paths), 2)
-            rows = list(_csv.reader(open(_os.path.join(d, "dg.csv"))))
-            self.assertEqual(len({len(r) for r in rows}), 1)
-            self.assertEqual(rows[-1][0], "Days used")
-            for r in rows[1:-1]:
-                float(r[1])
-            tex = open(_os.path.join(d, "dg.tex")).read()
-            self.assertIn("booktabs", tex)
-            self.assertEqual(tex.count("\\begin{table}"), 1)
-
-    def test_diagnostics_figure_writes_and_validates_keys(self):
-        from mobility_rt.plotting.figures_main import plot_location_diagnostics
-        tbl = compute_diagnostics_table([("One", self.sim, self.city)], self.gt)
-        with _tempfile.TemporaryDirectory() as d:
-            out = plot_location_diagnostics(tbl, save_prefix=_os.path.join(d, "f"))
-            self.assertTrue(_os.path.exists(out))
-            self.assertGreater(_os.path.getsize(out), 0)
-        with self.assertRaises(ValueError):
-            plot_location_diagnostics({}, save_prefix="unused")
-        with self.assertRaises(KeyError):
-            plot_location_diagnostics({"X": {"rank_median": 0.0}},
-                                      save_prefix="unused")
-
-    def test_figure_writes_and_validates_comparators(self):
-        from mobility_rt.plotting.figures_main import plot_location_discrepancy
-        tbl = compute_location_table([("One", self.sim, self.city)], self.gt)
-        with _tempfile.TemporaryDirectory() as d:
-            out = plot_location_discrepancy(tbl, save_prefix=_os.path.join(d, "f"))
-            self.assertTrue(_os.path.exists(out))
-            self.assertGreater(_os.path.getsize(out), 0)
-        with self.assertRaises(ValueError):
-            plot_location_discrepancy({}, save_prefix="unused")
-
-
-# ---------------------------------------------------------------------------
 # Estimator mean-relative-error tables
 # ---------------------------------------------------------------------------
 
@@ -1992,6 +1187,38 @@ from mobility_rt.error_tables import (
 from mobility_rt.estimators import _compute_naive_suite
 
 
+def _tex_structure_errors(text, n_data_cols=None):
+    """Structural problems in a generated LaTeX table: unbalanced braces or math,
+    and rows whose cell count does not match the tabular preamble.
+
+    The expected column count is read from the preamble itself when not given, so
+    the check cannot be wrong about the table it is checking."""
+    import re as _re
+    errs = []
+    if n_data_cols is None:
+        m = _re.search(r"\\begin\{tabular\}\{([^}]*)\}", text)
+        if not m:
+            return ["no tabular preamble found"]
+        n_data_cols = sum(1 for ch in m.group(1) if ch in "lcr")
+    body = "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("%"))
+    if body.count("{") != body.count("}"):
+        errs.append(f"unbalanced braces: {body.count('{')} open, "
+                    f"{body.count('}')} close")
+    if body.count("$") % 2:
+        errs.append("odd number of $ delimiters")
+    for env in ("table", "tabular"):
+        if body.count("\\begin{" + env + "}") != body.count("\\end{" + env + "}"):
+            errs.append(f"{env} not closed")
+    for line in body.split("\n"):
+        t = line.strip()
+        if not t.endswith("\\\\") or "multicolumn" in t:
+            continue
+        if t.count("&") != n_data_cols - 1:
+            errs.append(f"row has {t.count('&') + 1} cells, "
+                        f"expected {n_data_cols}: {t[:48]}")
+    return errs
+
+
 class TestErrorTables(unittest.TestCase):
 
     @classmethod
@@ -2003,14 +1230,14 @@ class TestErrorTables(unittest.TestCase):
         cls.gt = discretise_gamma(params["gen_time_mean"], params["gen_time_sd"],
                                   params["max_gen_time"])
         cls.city = generate_city(cls.N, scenario="lagos", seed=6)
-        f = generate_mobility(cls.N, cls.T, cls.city[1], cls.city[2],
-                              cls.city[3], cls.city[4], seed=6)[0]
+        f, base_f = generate_mobility(cls.N, cls.T, cls.city[1], cls.city[2],
+                                      cls.city[4], seed=6)
         init = np.zeros(cls.N); init[0] = 10.0
         LW = params["base_contact_rate"]
         cls.sim = simulate_epidemic_pde(
             cls.T, cls.N, cls.city[1], f, params["prob_transmission_peak"], cls.gt,
             params["max_gen_time"], params["R0_target"], init, LW, LW * 0.30,
-            cls.gt, cls.gt, birth_rate=3e-5, death_rate=3e-5, seed=6)
+            f_calibration=base_f)
         cls.scen = [("One", cls.sim, cls.city), ("Two", cls.sim, cls.city)]
         cls.table = compute_error_table(cls.scen, cls.gt)
 
@@ -2105,12 +1332,10 @@ class TestErrorTables(unittest.TestCase):
                                    R_ref[rep].mean(axis=1), rtol=1e-12)
 
     def test_all_estimators_share_the_one_case_floor(self):
-        """One floor, applied identically in all three estimator entry points."""
+        """One floor, applied identically in both estimator entry points."""
         import inspect
         from mobility_rt import estimators as _est
-        import mobility_rt.framework as _fw
-        for fn in (_est.estimate_R_independent, _est.compute_naive_R_aggregate,
-                   _fw.estimate_R_independent):
+        for fn in (_est.estimate_R_independent, _est.compute_naive_R_aggregate):
             self.assertIn("R_MIN_WINDOW_CASES", inspect.getsource(fn),
                           f"{fn.__name__} does not apply the observability floor")
         # the suite must not re-implement the estimator; it must delegate to it
@@ -2141,10 +1366,8 @@ class TestErrorTables(unittest.TestCase):
         # rho floor
         self.assertEqual(int((rho <= RHO_FLOOR).sum()), 0,
                          "RHO_FLOOR is excluding days, so it is a parameter")
-        # same-day incidence guards behind ind_iw / out_iw
-        self.assertEqual(int((m & (inc.sum(axis=1) <= 1e-6)).sum()), 0,
-                         "the incidence guard fires on a reported day")
-        # windowed infectiousness guard behind the per-location estimator
+        # windowed infectiousness guard behind the per-location estimator, and the
+        # total-infectiousness weight guards behind ind_Lw (windowed) and out_Lw
         lam = np.zeros((T, N))
         for t in range(T):
             for a in range(1, len(self.gt)):
@@ -2154,6 +1377,10 @@ class TestErrorTables(unittest.TestCase):
                        for t in range(T)])
         self.assertEqual(int((m[:, None] & (Lw <= 1e-4)).sum()), 0,
                          "the infectiousness guard fires on a reported day")
+        self.assertEqual(int((m & (Lw.sum(axis=1) <= 1e-6)).sum()), 0,
+                         "the ind_Lw weight guard fires on a reported day")
+        self.assertEqual(int((m & (lam.sum(axis=1) <= 1e-6)).sum()), 0,
+                         "the out_Lw weight guard fires on a reported day")
 
     def test_window_constant_is_single_sourced(self):
         from mobility_rt.estimators import WINDOW
@@ -2164,7 +1391,7 @@ class TestErrorTables(unittest.TestCase):
         or a difference between them could be a difference in day sets."""
         suite = _compute_naive_suite(self.sim, self.city, self.gt)
         masks = {k: np.isfinite(np.asarray(suite[k], dtype=float))
-                 for k in ("ind_am", "ind_iw", "ind_pw", "ind_Rw")}
+                 for k in ("ind_am", "ind_Lw", "ind_pw", "ind_Rw")}
         ref = masks["ind_am"]
         for k, m in masks.items():
             np.testing.assert_array_equal(m, ref, err_msg=f"{k} differs from ind_am")
@@ -2194,14 +1421,14 @@ class TestErrorTables(unittest.TestCase):
     def test_scheme_windowed_flags_are_right(self):
         """A sliding-window scheme must be flagged, an instantaneous one must not."""
         flags = {sch.key: sch.windowed for sch in SCHEMES}
-        for k in ("agg", "ind_am", "ind_iw", "ind_pw", "ind_Rw"):
+        for k in ("agg", "ind_am", "ind_Lw", "ind_pw", "ind_Rw"):
             self.assertTrue(flags[k], f"{k} uses the Cori window and must be flagged")
-        for k in ("out_am", "out_iw", "out_pw", "out_Rw"):
+        for k in ("out_am", "out_Lw", "out_pw", "out_Rw"):
             self.assertFalse(flags[k], f"{k} carries no window and must not be flagged")
         self.assertEqual(len(flags), len(SCHEMES))       # keys unique
         self.assertEqual(sorted(flags), sorted(
-            ["agg", "ind_am", "ind_iw", "ind_pw", "ind_Rw",
-             "out_am", "out_iw", "out_pw", "out_Rw"]),
+            ["agg", "ind_am", "ind_Lw", "ind_pw", "ind_Rw",
+             "out_am", "out_Lw", "out_pw", "out_Rw"]),
             "the scheme set changed; the tables and figures assume these nine")
 
     def test_windowed_scheme_is_scored_against_the_trailing_mean(self):
@@ -2253,7 +1480,7 @@ class TestErrorTables(unittest.TestCase):
         d = _compute_naive_suite(self.sim, self.city, self.gt)
         with self.assertRaises(KeyError):
             _plot_main_bias_3x3([(d, "a"), (d, "b"), (d, "c")],
-                                "not_a_scheme", "x", "y", "unused.pdf")
+                                "not_a_scheme", "unused.pdf")
 
     def test_duplicate_scenario_labels_rejected(self):
         with self.assertRaises(ValueError):
@@ -2271,18 +1498,26 @@ class TestErrorTables(unittest.TestCase):
         self.assertEqual(_tex_escape("{x}"), r"\{x\}")
         self.assertEqual(_tex_escape("Scenario A-het"), "Scenario A-het")
 
-    def test_summary_figure_writes_and_validates_labels(self):
-        from mobility_rt.plotting.figures_main import plot_estimator_error_summary
-        pairs = [("One", "Two", "Panel")]
+    def test_error_table_tex_is_structurally_valid(self):
+        """Balanced braces and math, closed environments, one cell per column in every
+        row, and one numeric column per scenario, for every written period.  This is
+        the only structural check on the .tex of Tables SI1-SI2."""
+        import re
         with _tempfile.TemporaryDirectory() as d:
-            out = plot_estimator_error_summary(self.table, pairs,
-                                               save_prefix=_os.path.join(d, "f"))
-            self.assertTrue(_os.path.exists(out))
-            self.assertGreater(_os.path.getsize(out), 0)
-            with self.assertRaises(KeyError):
-                plot_estimator_error_summary(
-                    self.table, [("One", "Nope", "Panel")],
-                    save_prefix=_os.path.join(d, "g"))
+            paths = write_error_tables(self.table, d, prefix="e")
+            tex_files = [p for p in paths if p.endswith(".tex")]
+            self.assertEqual(len(tex_files), len(TABLE_PERIODS))
+            n = len(self.table["full"]["labels"])
+            for path in tex_files:
+                with open(path, encoding="utf-8") as fh:
+                    body = fh.read()
+                errs = _tex_structure_errors(body)
+                self.assertEqual(errs, [], f"{_os.path.basename(path)}: {errs}")
+                pre = re.search(r"\\begin\{tabular\}\{([^}]*)\}", body).group(1)
+                self.assertEqual(sum(1 for c in pre if c == "r"), n,
+                                 f"{_os.path.basename(path)}: wrong number of "
+                                 f"numeric columns for {n} scenarios")
+
 
     def test_files_written_and_parseable(self):
         with _tempfile.TemporaryDirectory() as d:
@@ -2302,7 +1537,8 @@ class TestErrorTables(unittest.TestCase):
                 for r in rows[1:-1]:
                     for cell in r[2:]:
                         float(cell)                              # every value numeric
-                tex = open(_os.path.join(d, f"tbl_{period}.tex")).read()
+                with open(_os.path.join(d, f"tbl_{period}.tex"), encoding="utf-8") as fh:
+                    tex = fh.read()
                 self.assertEqual(tex.count("\\\\"), len(SCHEMES) + 2)
                 self.assertIn("booktabs", tex)          # the rules need that package
                 self.assertTrue(tex.startswith("%"))    # generated-file banner
@@ -2316,14 +1552,13 @@ class TestErrorTables(unittest.TestCase):
 # Generation time under spatially heterogeneous contact and transmissibility
 # ---------------------------------------------------------------------------
 
-from mobility_rt.generation_time import realised_generation_times
-from mobility_rt.gt_spatial import (
-    build_gt_spatial_table,
-    epidemic_window,
-    forward_gt_dispersion,
-    realised_gt_dispersion,
-    universal_gt,
-)
+
+def _renewal_gt(p):
+    """p(a_E) with the a_E = 0 entry zeroed and renormalised over a_E >= 1: the shape
+    every kernel normalisation in the model reduces to."""
+    g = np.asarray(p, dtype=float).copy()
+    g[0] = 0.0
+    return g / g.sum()
 
 
 class TestForwardGTUnderHeterogeneity(unittest.TestCase):
@@ -2358,8 +1593,8 @@ class TestForwardGTUnderHeterogeneity(unittest.TestCase):
             np.testing.assert_array_equal(a[key], b[key])
 
     def test_every_gt_is_the_universal_shape_under_heterogeneity(self):
-        """Pairwise, outward, inward and meeting-site GTs all collapse onto p/int p."""
-        g_univ = universal_gt(self.p)
+        """Pairwise, outward, inward, meeting-site and network GTs all equal p/int p."""
+        g_univ = _renewal_gt(self.p)
         gt = self._gt(self.c, self.m)
         R = gt["R_matrix"]
         for k in range(self.N):
@@ -2395,183 +1630,9 @@ class TestForwardGTUnderHeterogeneity(unittest.TestCase):
         het = self._gt(self.c, self.m)
         self.assertFalse(np.allclose(hom["R_matrix"], het["R_matrix"]))
 
-    def test_universal_gt_is_normalised_over_ages_one_and_up(self):
-        g = universal_gt(self.p)
-        self.assertEqual(g[0], 0.0)
-        self.assertAlmostEqual(float(g.sum()), 1.0, places=12)
-
-    def test_forward_dispersion_reports_machine_precision(self):
-        snaps = {"peak": self._gt(self.c, self.m)}
-        d = forward_gt_dispersion(snaps, self.p)
-        self.assertLess(d["sup_deviation"], 1e-13)
-        self.assertLess(d["mean_gt_range"], 1e-9)
-        self.assertAlmostEqual(d["mean_gt"], d["universal_mean"], places=10)
-        self.assertEqual(d["n_pairs"], self.N * self.N)
-
-
-class TestRealisedGenerationTimes(unittest.TestCase):
-    """The backward interval is a reweighting of p(a_E) by infection-age structure."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.N, cls.T = 5, 70
-        cls.params = COVID_PARAMS
-        cls.max_days = cls.params["max_gen_time"]
-        cls.p = discretise_gamma(cls.params["gen_time_mean"],
-                                 cls.params["gen_time_sd"], cls.max_days)
-        cls.city = generate_city(cls.N, scenario="lagos", seed=5)
-        cls.pops = cls.city[1]
-        cls.f = generate_mobility(cls.N, cls.T, cls.pops, cls.city[2],
-                                  cls.city[3], cls.city[4], seed=5)[0]
-        init = np.zeros(cls.N); init[0] = 10.0
-        LW = cls.params["base_contact_rate"]
-        cls.c = contact_multipliers(cls.city[3])
-        cls.m = infectiousness_multipliers(cls.N, seed=5)
-        common = dict(prob_peak=cls.params["prob_transmission_peak"],
-                      infect_profile=cls.p, max_days=cls.max_days,
-                      R0_target=cls.params["R0_target"],
-                      initial_infections=init, lambda_within=LW,
-                      lambda_between=LW * 0.30, birth_rate=3e-5, death_rate=3e-5,
-                      stochastic=False, susceptible_depletion=True, seed=5)
-        cls.sim_hom = simulate_epidemic_pde(cls.T, cls.N, cls.pops, cls.f, **common)
-        cls.sim_het = simulate_epidemic_pde(cls.T, cls.N, cls.pops, cls.f,
-                                            contact_mult=cls.c, infect_mult=cls.m,
-                                            **common)
-        cls.rg = realised_generation_times(cls.sim_het["E_pde_state"],
-                                           cls.sim_het["incidence_matrix"], cls.p)
-
-    def test_every_distribution_is_a_pmf_or_empty(self):
-        for key in ("g_infector", "g_infectee", "g_network"):
-            tot = self.rg[key].sum(axis=-1)
-            near_one = np.isclose(tot, 1.0, atol=1e-12)
-            near_zero = np.isclose(tot, 0.0, atol=1e-12)
-            self.assertTrue(np.all(near_one | near_zero), key)
-            self.assertTrue(near_one.any(), f"{key} is empty on every day")
-            self.assertTrue(np.all(self.rg[key] >= 0.0), key)
-
-    def test_age_zero_never_carries_mass(self):
-        """a_E = 0 is excluded from transmission, so no infector can be age zero."""
-        for key in ("g_infector", "g_infectee", "g_network"):
-            self.assertEqual(float(np.abs(self.rg[key][..., 0]).max()), 0.0, key)
-
-    def test_a_flat_age_profile_returns_the_intrinsic_shape(self):
-        """With E^k(t,a) constant in a, the reweighting is the identity."""
-        T, N, A = 3, 2, self.max_days
-        E = np.ones((T, N, A))
-        inc = np.ones((T, N, N))
-        out = realised_generation_times(E, inc, self.p)
-        g_univ = universal_gt(self.p)
-        for key in ("g_infector", "g_infectee"):
-            for t in range(T):
-                for n in range(N):
-                    np.testing.assert_allclose(out[key][t, n], g_univ, atol=1e-14)
-        np.testing.assert_allclose(out["g_network"][0], g_univ, atol=1e-14)
-
-    def test_infectee_distribution_is_the_pairwise_incidence_mixture(self):
-        """Recomputed by hand on one day, straight from the stored arrays."""
-        inc_mat = self.sim_het["incidence_matrix"]
-        t = int(self.sim_het["incidence"].sum(axis=1).argmax())
-        for j in range(self.N):
-            w = inc_mat[t, :, j]
-            if w.sum() <= 0:
-                continue
-            expect = (w @ self.rg["g_infector"][t]) / w.sum()
-            np.testing.assert_allclose(self.rg["g_infectee"][t, j], expect, atol=1e-14)
-
-    def test_means_are_consistent_with_the_distributions(self):
-        days = np.arange(self.max_days, dtype=float)
-        mu = self.rg["mean_infectee"]
-        ok = ~np.isnan(mu)
-        np.testing.assert_allclose(mu[ok], (self.rg["g_infectee"] @ days)[ok],
-                                   atol=1e-12)
-        self.assertTrue(np.isnan(mu[~ok]).all())
-
-    def test_growth_phase_interval_is_shorter_than_the_intrinsic_mean(self):
-        """Backward intervals are early-shifted while incidence is still growing."""
-        mu_univ = float(np.arange(self.max_days) @ universal_gt(self.p))
-        peak = int(self.sim_het["incidence"].sum(axis=1).argmax())
-        grow = self.rg["mean_network"][max(10, peak // 3):max(11, peak // 2)]
-        grow = grow[~np.isnan(grow)]
-        self.assertTrue(grow.size > 0)
-        self.assertLess(float(grow.max()), mu_univ)
-
-    def test_the_realised_interval_varies_across_space_and_the_forward_one_does_not(self):
-        """The question this whole analysis answers, as a single assertion."""
-        dis = realised_gt_dispersion(self.sim_het, self.p)
-        self.assertGreater(dis["max_spread"], 1e-3)   # backward: genuinely spatial
-        snaps = {}
-        for name, day in (("early", 20), ("peak", 45)):
-            snaps[name] = compute_generation_times(
-                self.f[day], self.sim_het["susceptibles"][day], self.pops,
-                self.params["prob_transmission_peak"], self.p, self.max_days,
-                self.sim_het["lambda_within_scaled"],
-                self.sim_het["lambda_between_scaled"], self.c, self.m)
-        self.assertLess(forward_gt_dispersion(snaps, self.p)["sup_deviation"], 1e-13)
-
-    def test_dispersion_is_restricted_to_the_observable_window(self):
-        dis = realised_gt_dispersion(self.sim_het, self.p)
-        mask = epidemic_window(self.sim_het["incidence"])
-        np.testing.assert_array_equal(mask, dis["window"])
-        self.assertTrue(np.all(np.isnan(dis["spread"][~mask])))
-
-    def test_rejects_mismatched_shapes(self):
-        E = self.sim_het["E_pde_state"]
-        inc = self.sim_het["incidence_matrix"]
-        with self.assertRaises(ValueError):
-            realised_generation_times(E, inc, self.p[:-1])
-        with self.assertRaises(ValueError):
-            realised_generation_times(E, inc[:, :-1], self.p)
-        with self.assertRaises(ValueError):
-            realised_generation_times(E[0], inc, self.p)
-
-    def test_table_is_written_and_every_value_parses(self):
-        import os as _os, csv as _csv, tempfile
-        snaps_hom = {"peak": compute_generation_times(
-            self.f[40], self.sim_hom["susceptibles"][40], self.pops,
-            self.params["prob_transmission_peak"], self.p, self.max_days,
-            self.sim_hom["lambda_within_scaled"],
-            self.sim_hom["lambda_between_scaled"])}
-        snaps_het = {"peak": compute_generation_times(
-            self.f[40], self.sim_het["susceptibles"][40], self.pops,
-            self.params["prob_transmission_peak"], self.p, self.max_days,
-            self.sim_het["lambda_within_scaled"],
-            self.sim_het["lambda_between_scaled"], self.c, self.m)}
-        scen = [("Dense urban (A)", self.sim_hom, snaps_hom),
-                ("Dense urban (A-het)", self.sim_het, snaps_het)]
-        with tempfile.TemporaryDirectory() as d:
-            table, paths = build_gt_spatial_table(scen, self.p, out_dir=d,
-                                                  prefix="gt", verbose=False)
-            self.assertEqual(len(paths), 2)
-            rows = list(_csv.reader(open(_os.path.join(d, "gt.csv"))))
-            self.assertEqual(rows[0], ["quantity", "Dense urban (A)",
-                                       "Dense urban (A-het)"])
-            for r in rows[1:]:
-                for cell in r[1:]:
-                    float(cell)
-            tex = open(_os.path.join(d, "gt.tex")).read()
-            self.assertTrue(tex.startswith("%"))
-            self.assertIn("booktabs", tex)
-            self.assertIn("\\begin{tabular}{lrr}", tex)
-            self.assertEqual(tex.count("\\begin{table}"), 1)
-        # the forward half is universal in BOTH columns; the realised half is not
-        for lab in ("Dense urban (A)", "Dense urban (A-het)"):
-            self.assertLess(table[lab]["forward_sup"], 1e-13)
-            self.assertGreater(table[lab]["spread_max"], 0.0)
-
-    def test_table_rejects_duplicate_scenario_labels(self):
-        snaps = {"peak": compute_generation_times(
-            self.f[40], self.sim_hom["susceptibles"][40], self.pops,
-            self.params["prob_transmission_peak"], self.p, self.max_days,
-            self.sim_hom["lambda_within_scaled"],
-            self.sim_hom["lambda_between_scaled"])}
-        with self.assertRaises(ValueError):
-            build_gt_spatial_table([("A", self.sim_hom, snaps),
-                                    ("A", self.sim_het, snaps)],
-                                   self.p, out_dir="unused", verbose=False)
-
 
 class TestCorrectedFigureScenarios(unittest.TestCase):
-    """Every alternative scenario gets the same corrected fig_02/03/04 set."""
+    """The corrected Fig 2 / Fig 3 / Fig 5 set (and its static-mobility twin)."""
 
     @classmethod
     def setUpClass(cls):
@@ -2585,22 +1646,18 @@ class TestCorrectedFigureScenarios(unittest.TestCase):
         cls.city = generate_city(cls.N, scenario="lagos", seed=9)
         pops = cls.city[1]
         cls.f, base_f = generate_mobility(cls.N, cls.T, pops, cls.city[2],
-                                          cls.city[3], cls.city[4], seed=9)
+                                          cls.city[4], seed=9)
         cls.f_static = np.stack([base_f] * cls.T, axis=0)
         init = np.zeros(cls.N); init[0] = 10.0
         LW = params["base_contact_rate"]
         common = dict(prob_peak=params["prob_transmission_peak"], infect_profile=cls.p,
                       max_days=cls.max_days, R0_target=params["R0_target"],
                       initial_infections=init, lambda_within=LW,
-                      lambda_between=LW * 0.30, seed=9)
+                      lambda_between=LW * 0.30, f_calibration=base_f)
         cls.sim = simulate_epidemic_pde(cls.T, cls.N, pops, cls.f, **common)
         cls.sim_s = simulate_epidemic_pde(cls.T, cls.N, pops, cls.f_static, **common)
-        cls.sim_h = simulate_epidemic_pde(
-            cls.T, cls.N, pops, cls.f,
-            contact_mult=contact_multipliers(cls.city[3]),
-            infect_mult=infectiousness_multipliers(cls.N, seed=9), **common)
         cls.gt = {"peak": compute_generation_times(
-            cls.f[20], cls.sim["susceptibles"][20], pops,
+            cls.f[20], cls.sim["S_start"][20], pops,
             params["prob_transmission_peak"], cls.p, cls.max_days,
             cls.sim["lambda_within_scaled"], cls.sim["lambda_between_scaled"])}
         cls.R_ind = estimate_R_independent(cls.sim["incidence"], cls.p, window=7)
@@ -2610,55 +1667,560 @@ class TestCorrectedFigureScenarios(unittest.TestCase):
         base = dict(sim=self.sim, sim_static=self.sim_s, city_data=self.city,
                     f_series=self.f, f_static=self.f_static, R_ind=self.R_ind,
                     R_ind_static=self.R_ind, gt_snaps=self.gt,
-                    gt_snaps_static=self.gt, gen_time_pmf=self.p, w_within=self.p,
-                    w_between=self.p, max_days=self.max_days)
+                    gt_snaps_static=self.gt, gen_time_pmf=self.p,
+                    max_days=self.max_days)
         base.update(kw)
         return run_corrected_figures, base
 
-    def test_each_extra_scenario_gets_the_full_file_set(self):
-        import os as _os, tempfile
-        run, kw = self._args()
-        extra = {"sim": self.sim_h, "city_data": self.city, "f_series": self.f,
-                 "R_ind": self.R_ind, "gt_snaps": self.gt,
-                 "name": "Dense urban (A-het)", "prefix": "fig_A_het"}
-        with tempfile.TemporaryDirectory() as d:
-            run(out_dir=d, extra_scenarios=[extra], **kw)
-            names = set(_os.listdir(d))
-            for pfx in ("fig", "fig_SI_static", "fig_A_het"):
-                for suffix in ("_02_overview.pdf", "_02_overview_surface.pdf",
-                               "_03_taxonomy.pdf", "_03_taxonomy_surface.pdf",
-                               "_04_spectral.pdf"):
-                    self.assertIn(pfx + suffix, names)
-            # three scenarios x five files, and nothing else
-            self.assertEqual(len(names), 15)
-
-    def test_a_duplicate_prefix_is_refused_rather_than_overwriting(self):
-        import tempfile
-        run, kw = self._args()
-        extra = {"sim": self.sim_h, "city_data": self.city, "f_series": self.f,
-                 "R_ind": self.R_ind, "gt_snaps": self.gt,
-                 "name": "clash", "prefix": "fig_SI_static"}
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(ValueError):
-                run(out_dir=d, extra_scenarios=[extra], **kw)
-
-    def test_an_incomplete_extra_scenario_is_refused(self):
-        import tempfile
-        run, kw = self._args()
-        extra = {"sim": self.sim_h, "city_data": self.city, "f_series": self.f,
-                 "name": "incomplete", "prefix": "fig_x"}
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(KeyError):
-                run(out_dir=d, extra_scenarios=[extra], **kw)
-
-    def test_no_extras_still_writes_exactly_the_original_two_sets(self):
+    def test_writes_exactly_the_two_manuscript_sets(self):
         import os as _os, tempfile
         run, kw = self._args()
         with tempfile.TemporaryDirectory() as d:
             prefixes = run(out_dir=d, **kw)
             self.assertEqual(len(prefixes), 2)
-            self.assertEqual(len(_os.listdir(d)), 10)
+            names = set(_os.listdir(d))
+            for pfx in ("fig", "fig_SI_static"):
+                for suffix in ("_02_overview.pdf", "_02_overview_surface.pdf",
+                               "_03_taxonomy.pdf", "_03_taxonomy_surface.pdf",
+                               "_04_spectral.pdf"):
+                    self.assertIn(pfx + suffix, names)
+            self.assertEqual(len(names), 10)
 
+
+
+
+# ---------------------------------------------------------------------------
+# Oracle tests for the fix-plan corrections (docs/FIX_PLAN.md, Phase 3)
+# ---------------------------------------------------------------------------
+#
+# Each class compares one manuscript quantity with an independent computation
+# (brute force, closed form, a hand-worked example or scipy).  New names are
+# imported inside the tests so that this module still imports on code that
+# predates them, which is how each test was seen to fail before its fix.
+
+
+def _small_run(contact_mult=None, infect_mult=None, T=60, N=6, seed=3):
+    """A short run on the pipeline's conventions (calibrated on base_f)."""
+    from mobility_rt.config import BETWEEN_FRACTION
+    params = COVID_PARAMS
+    max_days = params["max_gen_time"]
+    p = discretise_gamma(params["gen_time_mean"], params["gen_time_sd"], max_days)
+    city = generate_city(N, scenario="lagos", seed=seed)
+    f, base_f = generate_mobility(N, T, city[1], city[2], city[4],
+                                  day_variation_sd=0.15, seed=seed)
+    init = np.zeros(N)
+    init[0] = 10.0
+    LW = params["base_contact_rate"]
+    sim = simulate_epidemic_pde(T, N, city[1], f, params["prob_transmission_peak"], p,
+                                max_days, params["R0_target"], init, LW,
+                                LW * BETWEEN_FRACTION, f_calibration=base_f,
+                                contact_mult=contact_mult, infect_mult=infect_mult)
+    return sim, city, f, base_f, p
+
+
+class TestStartOfDaySusceptibles(unittest.TestCase):
+    """F03: R_matrices[t] and the day-t force of infection use START-of-day S."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.runs = {}
+        for tag, kw in (("hom", {}), ("het", "het")):
+            if kw == "het":
+                city = generate_city(6, scenario="lagos", seed=3)
+                kw = dict(contact_mult=contact_multipliers(city[3]),
+                          infect_mult=infectiousness_multipliers(6, seed=3))
+            cls.runs[tag] = (_small_run(**kw), kw)
+
+    def test_R_matrices_use_start_of_day_S(self):
+        pp = COVID_PARAMS["prob_transmission_peak"]
+        for tag, ((sim, city, f, base_f, p), kw) in self.runs.items():
+            self.assertNotIn("susceptibles", sim)
+            pops = city[1]
+            S0, S1 = sim["S_start"], sim["S_end"]
+            np.testing.assert_array_equal(S0[0], pops)
+            np.testing.assert_array_equal(S0[1:], S1[:-1])
+            lw, lb = sim["lambda_within_scaled"], sim["lambda_between_scaled"]
+            c, m = kw.get("contact_mult"), kw.get("infect_mult")
+            for t in range(sim["incidence"].shape[0]):
+                np.testing.assert_allclose(
+                    compute_R_matrix(f[t], S0[t], pops, pp, p, lw, lb, c, m),
+                    sim["R_matrices"][t], rtol=1e-12, atol=0,
+                    err_msg=f"{tag}: R_matrices[{t}] is not built from S_start[{t}]")
+                np.testing.assert_allclose(
+                    compute_R_meeting(f[t], S0[t], pops, pp, p, lw, lb, c, m),
+                    sim["R_meeting_series"][t], rtol=1e-12, atol=0,
+                    err_msg=f"{tag}: R_meeting_series[{t}] is not built from S_start[{t}]")
+
+    def test_effective_susceptibles_align_with_R(self):
+        from mobility_rt.simulation import compute_effective_populations_series
+        sim, city, f, base_f, p = self.runs["hom"][0]
+        S_eff, _ = compute_effective_populations_series(
+            f, sim["S_start"], sim["incidence"], p, len(p))
+        for t in range(sim["incidence"].shape[0]):
+            np.testing.assert_allclose(S_eff[t], f[t].T @ sim["S_start"][t], rtol=1e-14)
+
+    def test_calibration_is_exact_on_the_calibration_matrix(self):
+        """D5: ρ(R) = R0 for a fully susceptible population under f_calibration."""
+        pp = COVID_PARAMS["prob_transmission_peak"]
+        for tag, ((sim, city, f, base_f, p), kw) in self.runs.items():
+            R_cal = compute_R_matrix(base_f, city[1], city[1], pp, p,
+                                     sim["lambda_within_scaled"],
+                                     sim["lambda_between_scaled"],
+                                     kw.get("contact_mult"), kw.get("infect_mult"))
+            self.assertAlmostEqual(R_system(R_cal), COVID_PARAMS["R0_target"],
+                                   places=10, msg=tag)
+
+
+class TestMeetingLocationEq50(unittest.TestCase):
+    """F06: R^l_meeting is Eq 50, Σ_j Σ_k f^{jl} S_j f^{kl} λ^{kl} over a_E >= 1."""
+
+    @classmethod
+    def setUpClass(cls):
+        rng = np.random.default_rng(0)
+        cls.N = 6
+        raw = rng.uniform(0.2, 1.0, (cls.N, cls.N))
+        cls.f = raw / raw.sum(axis=1, keepdims=True)
+        cls.pops = rng.uniform(1e4, 1e5, cls.N)
+        cls.S = cls.pops * rng.uniform(0.3, 1.0, cls.N)
+        cls.c = np.exp(rng.normal(0, 0.4, cls.N))
+        cls.m = np.exp(rng.normal(0, 0.5, cls.N))
+        cls.p = discretise_gamma(5.5, 1.8, 20)
+        cls.pp, cls.lw, cls.lb = 0.035, 14.0, 4.2
+
+    def test_R_meeting_sums_to_total_R_under_heterogeneity(self):
+        M = compute_R_meeting(self.f, self.S, self.pops, self.pp, self.p,
+                              self.lw, self.lb, self.c, self.m)
+        R = compute_R_matrix(self.f, self.S, self.pops, self.pp, self.p,
+                             self.lw, self.lb, self.c, self.m)
+        self.assertAlmostEqual(M.sum() / R.sum(), 1.0, places=12)
+
+    def test_R_meeting_matches_eq50_brute_force(self):
+        N, f = self.N, self.f
+        N_eff = np.array([sum(f[j, l] * self.pops[j] for j in range(N)) for l in range(N)])
+        sum_p = self.p[1:].sum()
+        want = np.zeros(N)
+        for l in range(N):
+            for j in range(N):
+                for k in range(N):
+                    chi = self.c[l] * (self.lw if k == l else self.lb)
+                    want[l] += (f[j, l] * self.S[j] * f[k, l] * chi
+                                * self.m[k] * self.pp * sum_p / N_eff[l])
+        got = compute_R_meeting(f, self.S, self.pops, self.pp, self.p,
+                                self.lw, self.lb, self.c, self.m)
+        np.testing.assert_allclose(got, want, rtol=1e-12)
+
+    def test_R_meeting_reduces_to_own_infectiousness_without_travel(self):
+        """With f = I every contact at l is between residents of l, so m enters as m_l."""
+        eye = np.eye(self.N)
+        M = compute_R_meeting(eye, self.S, self.pops, self.pp, self.p,
+                              self.lw, self.lb, None, self.m)
+        M1 = compute_R_meeting(eye, self.S, self.pops, self.pp, self.p,
+                               self.lw, self.lb, None, None)
+        np.testing.assert_allclose(M, self.m * M1, rtol=1e-12)
+
+
+class TestNetworkGenerationTimeEq27(unittest.TestCase):
+    """F42: g_network is Eqs 27-28, eigenvector-weighted, not the unweighted sum."""
+
+    def test_eigenvector_weighted_gt_is_eqs_27_28_for_a_nonseparable_kernel(self):
+        import scipy.linalg
+        rng = np.random.default_rng(42)
+        N, A = 5, 12
+        R = rng.uniform(0.05, 1.0, (N, N))              # code orientation: R[k, j]
+        K = np.zeros((A, N, N))
+        for k in range(N):
+            for j in range(N):
+                q = np.zeros(A)
+                q[1:] = rng.gamma(1.0 + 3.0 * rng.uniform(), 1.0, A - 1)
+                K[:, k, j] = R[k, j] * q / q.sum()        # a different shape per pair
+        R_ms = R.T                                         # manuscript NGM: R_ms[j, k] = R^{kj}
+        w, vl, vr = scipy.linalg.eig(R_ms, left=True, right=True)
+        i = int(np.argmax(w.real))
+        rho = float(w[i].real)
+        vstar = np.abs(vr[:, i].real)                      # R_ms v* = rho v*  (Eq 25)
+        v = np.abs(vl[:, i].real)                          # v^T R_ms = rho v^T (Eq 26)
+        K_net = np.zeros(A)
+        for j in range(N):
+            for k in range(N):
+                K_net += v[j] * vstar[k] * K[:, k, j] / (v @ vstar)
+        want = K_net / rho
+        got = eigenvector_weighted_gt(K, R)
+        np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-15)
+        self.assertAlmostEqual(got.sum(), 1.0, places=12)
+        self.assertFalse(np.allclose(got, K.sum(axis=(1, 2)) / R.sum(), atol=1e-6),
+                         "fixture is too close to separable to tell Eq 27 from the plain sum")
+
+    def test_compute_generation_times_uses_eqs_27_28(self):
+        from unittest import mock
+        import mobility_rt.generation_time as gt_mod
+        rng = np.random.default_rng(1)
+        raw = rng.uniform(0.2, 1.0, (4, 4))
+        f = raw / raw.sum(axis=1, keepdims=True)
+        pops = rng.uniform(1e4, 1e5, 4)
+        p = discretise_gamma(5.5, 1.8, 15)
+        sentinel = np.full(15, 0.123)
+        with mock.patch.object(gt_mod, "eigenvector_weighted_gt", return_value=sentinel) as spy:
+            out = gt_mod.compute_generation_times(f, pops, pops, 0.035, p, 15, 14.0, 4.2)
+        spy.assert_called_once()
+        np.testing.assert_array_equal(out["g_network"], sentinel)
+
+    def test_profile_length_must_equal_max_days(self):
+        p = discretise_gamma(5.5, 1.8, 15)
+        f = np.eye(3)
+        pops = np.full(3, 1e4)
+        with self.assertRaises(ValueError):
+            compute_generation_times(f, pops, pops, 0.035, p, 20, 14.0, 4.2)
+
+
+class TestInfectiousnessWeighting(unittest.TestCase):
+    """D12: network aggregates weighted by total infectiousness Λ_j (ref [68])."""
+
+    def test_total_infectiousness_matches_the_forward_model(self):
+        from mobility_rt.estimators import total_infectiousness
+        rng = np.random.default_rng(4)
+        inc = rng.uniform(0, 50, (40, 3))
+        p = discretise_gamma(5.5, 1.8, 25)
+        want = np.zeros_like(inc)
+        for t in range(40):
+            for a in range(1, 25):
+                if t - a >= 0:
+                    want[t] += p[a] * inc[t - a]
+        np.testing.assert_allclose(total_infectiousness(inc, p), want, rtol=1e-13)
+
+    def test_hand_computed_two_location_example(self):
+        """p puts all mass on lag 1 and incidence is constant (10 and 30 per day), so
+        Λ_j(t) = I_j(t-1) and every window sum is 7 I_j; R_out = (3, 7)."""
+        T = 20
+        inc = np.zeros((T, 2))
+        inc[:, 0], inc[:, 1] = 10.0, 30.0
+        p = np.array([0.0, 1.0, 0.0])
+        sim = {"incidence": inc,
+               "R_matrices": np.tile(np.array([[1.0, 2.0], [3.0, 4.0]]), (T, 1, 1))}
+        city = (None, np.array([1.0, 1.0]), None, ["core", "core"], {})
+        s = _compute_naive_suite(sim, city, p)
+        self.assertNotIn("ind_iw", s)
+        self.assertNotIn("out_iw", s)
+        t = 10
+        R1 = (R_PRIOR_SHAPE + 70.0) / (R_PRIOR_RATE + 70.0)
+        R2 = (R_PRIOR_SHAPE + 210.0) / (R_PRIOR_RATE + 210.0)
+        self.assertAlmostEqual(s["ind_Lw"][t], (70.0 * R1 + 210.0 * R2) / 280.0, places=12)
+        self.assertAlmostEqual(s["out_Lw"][t], (10.0 * 3.0 + 30.0 * 7.0) / 40.0, places=12)
+        self.assertAlmostEqual(s["out_pw"][t], 5.0, places=12)
+
+
+class TestSpectralHelpers(unittest.TestCase):
+
+    def _positive_matrices(self):
+        rng = np.random.default_rng(8)
+        mats = [rng.uniform(0.01, 1.0, (6, 6)) for _ in range(10)]
+        # positive, with a complex-conjugate pair of non-Perron eigenvalues
+        mats.append(np.array([[0.1, 1.0, 0.1], [0.1, 0.1, 1.0], [1.0, 0.1, 0.1]]))
+        return mats
+
+    def test_condition_number_matches_scipy(self):
+        """F19: κ = ||v|| ||v*|| / |vᵀv*| (Eq 38), independent of eigenvector scaling."""
+        import scipy.linalg
+        for R in self._positive_matrices():
+            w, vl, vr = scipy.linalg.eig(R, left=True, right=True)
+            i = int(np.argmax(np.abs(w)))
+            a, b = vl[:, i], vr[:, i]
+            want = np.linalg.norm(a) * np.linalg.norm(b) / abs(np.vdot(a, b))
+            self.assertAlmostEqual(sensitivity_elasticity(R)["condition_number"] / want,
+                                   1.0, places=10)
+
+    def test_condition_number_raises_no_warning(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            for R in self._positive_matrices():
+                sensitivity_elasticity(R)
+
+    def test_infector_and_infectee_elasticities_coincide(self):
+        """F05 / V11: Σ_j ε^{kj} and Σ_k ε^{kj} are the same vector for any matrix."""
+        for R in self._positive_matrices():
+            E = sensitivity_elasticity(R)["elasticity"]
+            np.testing.assert_allclose(E.sum(axis=1), E.sum(axis=0), rtol=0, atol=1e-12)
+
+    def test_A1_is_the_manuscript_l1_norm(self):
+        """Eq 40: A1(n) = ||R_ms^n||_1 and the code's R_mat is R_ms transposed."""
+        rng = np.random.default_rng(9)
+        R = rng.uniform(0.0, 0.6, (5, 5))
+        env = amplification_envelope(R, n_max=8)
+        for n in range(9):
+            self.assertAlmostEqual(
+                env["A1"][n], np.linalg.norm(np.linalg.matrix_power(R.T, n), 1), places=12)
+
+
+class TestScenarioDecisions(unittest.TestCase):
+    """D5 (calibration on base_f), D6 (closed population), D16 (Scenario C)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import contextlib
+        import io
+        from mobility_rt.scripts.run_all import build_scenarios
+        with contextlib.redirect_stdout(io.StringIO()):
+            cls.sc = build_scenarios()
+
+    def _runs(self):
+        sc = self.sc
+        return (("A", sc["sim_A"], sc["city_A"], sc["base_fA"]),
+                ("A-static", sc["sim_A_static"], sc["city_A"], sc["base_fA"]),
+                ("A-het", sc["sim_A_het"], sc["city_A"], sc["base_fA"]),
+                ("B", sc["sim_B"], sc["city_B"], sc["base_fB"]),
+                ("B-het", sc["sim_B_het"], sc["city_B"], sc["base_fB"]),
+                ("C", sc["sim_C"], sc["city_C"], sc["base_fC"]),
+                ("C-het", sc["sim_C_het"], sc["city_C"], sc["base_fC"]))
+
+    def test_every_scenario_is_calibrated_on_its_base_mobility(self):
+        pp = self.sc["params"]["prob_transmission_peak"]
+        for tag, sim, city, base_f in self._runs():
+            R_cal = compute_R_matrix(base_f, city[1], city[1], pp, self.sc["infect_profile"],
+                                     sim["lambda_within_scaled"], sim["lambda_between_scaled"],
+                                     sim["contact_mult"], sim["infect_mult"])
+            self.assertAlmostEqual(R_system(R_cal), self.sc["params"]["R0_target"],
+                                   places=10, msg=tag)
+
+    def test_population_is_closed(self):
+        """No births or deaths: S_end(t) + cumulative incidence = N on every day."""
+        import inspect
+        from mobility_rt.simulation import _simulate_heun, _simulate_rk4
+        for tag, sim, city, _ in self._runs():
+            lhs = sim["S_end"] + np.cumsum(sim["incidence"], axis=0)
+            np.testing.assert_allclose(lhs, np.broadcast_to(city[1], lhs.shape),
+                                       rtol=1e-12, atol=0, err_msg=tag)
+        removed = {"birth_rate", "death_rate", "w_within", "w_between", "stochastic",
+                   "seed", "susceptible_depletion"}
+        for fn in (simulate_epidemic_pde, _simulate_heun, _simulate_rk4):
+            self.assertFalse(set(inspect.signature(fn).parameters) & removed, fn.__name__)
+
+    def test_scenario_C_differs_from_A_only_in_populations_and_hub_power(self):
+        sc = self.sc
+        f_A, f_C = sc["f_A"], sc["f_C"]
+        # same commuting fractions and the same daily noise draws, so the same home
+        # fraction on every day; only the destinations of the away fraction differ
+        np.testing.assert_allclose(np.diagonal(f_C, axis1=1, axis2=2),
+                                   np.diagonal(f_A, axis1=1, axis2=2), rtol=0, atol=1e-12)
+        np.testing.assert_array_equal(sc["initial_C"], sc["initial_A"])
+        np.testing.assert_array_equal(sc["city_C"][0], sc["city_A"][0])
+        np.testing.assert_array_equal(sc["city_C"][2], sc["city_A"][2])
+        types_C = sc["city_C"][3]
+        self.assertEqual(types_C, ["core"] + ["peripheral"] * 9)
+        self.assertEqual(sc["city_C"][4]["node_types"], types_C)
+        meta = sc["city_C"][4]
+        idx = (meta["hub_idx"], meta["mid_idx"], meta["periph_idx"])
+        self.assertEqual(meta["hub_idx"], int(np.argmax(sc["city_C"][1])))
+        self.assertEqual(len(set(idx)), 3, f"representative locations not distinct: {idx}")
+
+    def test_hub_representative_locations_rule(self):
+        """periph = satellite farthest from the hub; mid = lower-median distance."""
+        from mobility_rt.scripts.run_all import hub_representative_locations
+        d = np.array([[0.0, 5.0, 9.0, 2.0],
+                      [5.0, 0.0, 4.0, 3.0],
+                      [9.0, 4.0, 0.0, 7.0],
+                      [2.0, 3.0, 7.0, 0.0]])
+        # satellites 1, 2, 3 lie 5, 9 and 2 km from the hub
+        self.assertEqual(hub_representative_locations(d, 0), (0, 1, 2))
+        tied = d.copy()
+        tied[3, 0] = tied[0, 3] = 9.0
+        with self.assertRaises(ValueError):
+            hub_representative_locations(tied, 0)
+
+
+class TestCoreHelpers(unittest.TestCase):
+    """Single sources for quantities the figures used to compute inline (P3.6)."""
+
+    def test_risk_averse_R_is_the_alpha_one_lehmer_mean(self):
+        from mobility_rt.transmissibility import risk_averse_R
+        rng = np.random.default_rng(10)
+        R_out = rng.uniform(0.1, 3.0, (7, 4))
+        np.testing.assert_allclose(risk_averse_R(R_out),
+                                   lehmer_mean_spectrum(R_out, np.array([1.0]))[0],
+                                   rtol=1e-13)
+        self.assertAlmostEqual(risk_averse_R(np.array([1.0, 3.0])), 10.0 / 4.0, places=14)
+        self.assertTrue(np.isnan(risk_averse_R(np.zeros(3))))
+
+    def test_within_fraction_hand_example(self):
+        import warnings
+        from mobility_rt.transmissibility import within_fraction
+        M = np.zeros((2, 2, 2))
+        M[0] = [[3.0, 1.0], [2.0, 4.0]]     # [k infector, j infectee]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            pi_j, pi_bar = within_fraction(M)
+        np.testing.assert_allclose(pi_j[0], [3.0 / 5.0, 4.0 / 5.0])
+        self.assertAlmostEqual(pi_bar[0], 7.0 / 10.0)
+        self.assertTrue(np.isnan(pi_j[1]).all() and np.isnan(pi_bar[1]))
+
+    def test_renewal_gt(self):
+        from mobility_rt.distributions import renewal_gt
+        p = discretise_gamma(5.5, 1.8, 25)
+        g = renewal_gt(p)
+        self.assertEqual(g[0], 0.0)
+        self.assertAlmostEqual(g.sum(), 1.0, places=14)
+        f = np.full((3, 3), 1.0 / 3.0)
+        pops = np.full(3, 1e4)
+        snap = compute_generation_times(f, pops, pops, 0.035, p, 25, 14.0, 4.2)
+        np.testing.assert_allclose(snap["g_pairwise"][:, 0, 1], g, atol=1e-15)
+
+    def test_phase_days(self):
+        from mobility_rt.simulation import phase_days
+        inc = np.zeros((100, 2))
+        inc[30, 0] = 5.0
+        self.assertEqual(phase_days(inc), {"early": 10, "peak": 30, "late": 60})
+        inc = np.zeros((100, 2))
+        inc[1, 1] = 5.0
+        self.assertEqual(phase_days(inc)["early"], 1)
+        inc = np.zeros((100, 2))
+        inc[90, 1] = 5.0
+        self.assertEqual(phase_days(inc)["late"], 99)
+
+
+class TestFigureFixes(unittest.TestCase):
+    """Plotting fixes of docs/FIX_PLAN.md Phases 4-5, checked on one small run."""
+
+    @classmethod
+    def setUpClass(cls):
+        import matplotlib
+        matplotlib.use("Agg")
+        cls.sim, cls.city, cls.f, cls.base_f, cls.p = _small_run(T=260, N=6)
+        cls.suite = _compute_naive_suite(cls.sim, cls.city, cls.p)
+        cls.R_ind = estimate_R_independent(cls.sim["incidence"], cls.p, window=7)
+        cls.snaps = {"peak": compute_generation_times(
+            cls.f[50], cls.sim["S_start"][50], cls.city[1],
+            COVID_PARAMS["prob_transmission_peak"], cls.p, len(cls.p),
+            cls.sim["lambda_within_scaled"], cls.sim["lambda_between_scaled"])}
+
+    def tearDown(self):
+        import matplotlib.pyplot as plt
+        plt.close("all")
+
+    @staticmethod
+    def _capture(fn, *args, **kwargs):
+        """Run a plotting function with savefig and close disabled; return its figures."""
+        import matplotlib.pyplot as plt
+        from unittest import mock
+        before = set(plt.get_fignums())
+        with mock.patch.object(plt, "savefig"), mock.patch.object(plt, "close"):
+            fn(*args, **kwargs)
+        return [plt.figure(n) for n in plt.get_fignums() if n not in before]
+
+    @staticmethod
+    def _axis_with_label(fig, letter):
+        hits = [ax for ax in fig.axes if any(t.get_text() == letter for t in ax.texts)]
+        assert len(hits) == 1, f"expected one axes labelled {letter!r}, found {len(hits)}"
+        return hits[0]
+
+    def test_bias_figure_statistics_equal_the_table_cells(self):
+        """P4.1: every MRE, bias and day count in a statistics box is its table cell."""
+        import matplotlib.pyplot as plt
+        from unittest import mock
+        from mobility_rt.error_tables import _period_masks, scored_crossing_day
+        from mobility_rt.plotting.figures_main import _plot_main_bias_3x3
+        table = compute_error_table([("One", self.sim, self.city)], self.p)
+        for period in ("growth", "decline"):
+            self.assertGreater(table[period]["n_days"]["One"], 0,
+                               f"fixture has no {period} days")
+        all_data = [(self.suite, "a"), (self.suite, "b"), (self.suite, "c")]
+        masks = _period_masks(self.suite)
+        with mock.patch.object(plt, "savefig"):
+            for sch in SCHEMES:
+                stats = _plot_main_bias_3x3(all_data, sch.key, "unused.pdf")
+                row = stats["a"]
+                for period in ("growth", "decline"):
+                    mre, bias = row["scheme"][period]
+                    self.assertAlmostEqual(mre, table[period]["mre"][sch.key]["One"],
+                                           places=9, msg=(sch.key, period))
+                    self.assertAlmostEqual(bias, table[period]["bias"][sch.key]["One"],
+                                           places=9, msg=(sch.key, period))
+                    self.assertEqual(row["n_days"][period],
+                                     table[period]["n_days"]["One"])
+                # D10: crossing lag on the scored days, against rho on day t
+                c_s = scored_crossing_day(self.suite[sch.key], masks["full"])
+                c_r = scored_crossing_day(self.suite["rho_t"], masks["full"])
+                want = None if c_s is None or c_r is None else c_s - c_r
+                self.assertEqual(row["scheme"]["threshold_days"], want, sch.key)
+
+    def test_no_literal_part_tilde_titles(self):
+        import inspect
+        import mobility_rt.plotting.figures_main as fm
+        self.assertNotIn("Part~", inspect.getsource(fm))
+
+    def test_fig3_I_J_compare_with_trailing_means(self):
+        """P4.2: the solid curves in Fig 3 I and J are 7-day trailing means."""
+        from mobility_rt.plotting.figures_corrected import plot_fig03_taxonomy
+        from mobility_rt.geometry import representative_locs
+        figs = self._capture(plot_fig03_taxonomy, self.sim, self.city, self.R_ind,
+                             self.snaps, self.p, "unused")
+        R_mats = self.sim["R_matrices"]
+        series = {"I": np.array([R_inward(R) for R in R_mats]),
+                  "J": np.array([R_outward(R) for R in R_mats])}
+        _, _, _, show_locs, show_lbls = representative_locs(self.city)
+        for letter, ser in series.items():
+            ax = self._axis_with_label(figs[-1], letter)
+            solid = {ln.get_label(): ln for ln in ax.get_lines()
+                     if ln.get_linestyle() == "-" and ln.get_label() in show_lbls}
+            self.assertEqual(set(solid), set(show_lbls))
+            for j, lbl in zip(show_locs, show_lbls):
+                x = np.asarray(solid[lbl].get_xdata(), dtype=int)
+                np.testing.assert_allclose(solid[lbl].get_ydata(),
+                                           trailing_mean(ser[:, j], 7)[x], rtol=1e-12)
+
+    def test_fig3_K_keeps_undefined_T_j_as_nan(self):
+        """F10: undefined T_j reaches the tile and the surface as NaN, not 0."""
+        from unittest import mock
+        import mobility_rt.plotting.figures_corrected as fc
+        T_ser = np.array([type_reproduction_numbers(R) for R in self.sim["R_matrices"]])
+        self.assertTrue(np.isnan(T_ser).any(), "fixture has no undefined T_j")
+        for surface, name in ((False, "_plot_time_location_tile"),
+                              (True, "_plot_time_location_surface")):
+            real = getattr(fc, name)
+            recorded = {}
+
+            def spy(*args, letter, **kwargs):
+                Z = args[1] if name == "_plot_time_location_tile" else args[2]
+                recorded[letter] = np.array(Z, dtype=float, copy=True)
+                out = real(*args, letter=letter, **kwargs)
+                if name == "_plot_time_location_tile":
+                    recorded[letter + "_masked"] = int(np.ma.count_masked(out.get_array()))
+                return out
+
+            with mock.patch.object(fc, name, side_effect=spy):
+                self._capture(fc.plot_fig03_taxonomy, self.sim, self.city, self.R_ind,
+                              self.snaps, self.p, "unused", surface_3d=surface)
+            np.testing.assert_array_equal(np.isnan(recorded["K"]), np.isnan(T_ser))
+            if not surface:
+                self.assertEqual(recorded["K_masked"], int(np.isnan(T_ser).sum()))
+
+    def test_surface_draws_every_location(self):
+        """F09: rows of the surface are locations, so none may be skipped."""
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+        from mobility_rt.plotting.figures_corrected import _plot_time_location_surface
+        fig = plt.figure()
+        gs = gridspec.GridSpec(1, 1, figure=fig)
+        Z = np.random.default_rng(0).uniform(size=(365, 10))
+        ax = _plot_time_location_surface(fig, gs[0, 0], Z, 365, 10,
+                                         cbar_title="z", letter="X")
+        self.assertEqual(ax.collections[0].get_array().size, 9 * 91)
+
+    def test_type_figures_mark_one_on_the_colorbar(self):
+        """F16: the dotted threshold line on each T colorbar is at 1, not norm(1)."""
+        from mobility_rt.plotting.figures_main import plot_type_repro
+        figs = self._capture(plot_type_repro, self.sim, self.sim, self.city, self.city,
+                             "unused")
+        dotted = [ln for fig in figs for ax in fig.axes
+                  if getattr(ax, "_colorbar", None) is not None
+                  for ln in ax.get_lines() if ln.get_linestyle() == ":"]
+        self.assertEqual(len(dotted), 4)     # two heatmaps, two type-group tiles
+        for ln in dotted:
+            np.testing.assert_array_equal(np.asarray(ln.get_ydata(), dtype=float), [1.0, 1.0])
+
+    def test_SI26_accepts_an_all_nan_estimate(self):
+        """P4.3: no NameError from an unbound colorbar mappable."""
+        from mobility_rt.plotting.figures_si import plot_SI_R_comparison
+        R_nan = np.full(self.sim["incidence"].shape, np.nan)
+        self._capture(plot_SI_R_comparison, self.sim, self.city, R_nan, "unused")
 
 
 # ---------------------------------------------------------------------------

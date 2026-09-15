@@ -94,29 +94,30 @@ def R_system(R_mat):
 
 def compute_R_meeting(f_t, S, populations, prob_peak, infect_profile, lw, lb,
                       contact_mult=None, infect_mult=None):
-    """
-    R^l_meeting(t) = m̄[l] * S^l_eff * κ_eff(l) * prob_peak * Σ_{a≥1} p(a) / N^l_eff
-    κ_eff(l) = c[l] * (lw*f[l,l] + lb*Σ_{k≠l} f[k,l])
-    (Σ over a ≥ 1, consistent with compute_R_matrix and the forward simulator.)
+    """Meeting-location reproduction numbers R^l_meeting(t), manuscript Eq 50.
 
-    R^l_meeting is a per-infectious-person quantity at meeting location l, so with
-    heterogeneous infectiousness it needs the infectiousness of a TYPICAL person
-    present at l.  m̄[l] is therefore the presence-weighted mean
-      m̄[l] = Σ_k f[k,l] N_k m[k] / Σ_k f[k,l] N_k = Σ_k f[k,l] N_k m[k] / N_eff[l],
-    which reduces to m[l] when nobody travels and to 1 when m ≡ 1.
+      R^l_meeting(t) = Σ_j Σ_k f^{jl}(t) S_j(t) f^{kl}(t) ∫_{a≥1} λ^{kl}_E(t, a_E) da_E,
+
+    with, as everywhere in the model (Eq 7 and compute_R_matrix),
+      λ^{kl}_E(t, a_E) = χ^{kl} m_k prob_peak p(a_E) / N^l_eff(t),
+      χ^{kl} = c_l · (lw if k == l else lb)   (lw when the infector is at home),
+      N^l_eff(t) = Σ_j f^{jl}(t) N_j.
+    Hence
+      R^l_meeting = c_l · prob_peak · Σ_{a≥1} p(a) · S^l_eff / N^l_eff
+                    · Σ_k f^{kl} χ̃^{kl} m_k,     χ̃^{kl} = lw if k == l else lb,
+    with S^l_eff = Σ_j f^{jl} S_j.  Summing over l recovers Σ_{k,j} R^{kj}: every
+    infection is attributed to exactly one meeting location.
     """
     N        = f_t.shape[0]
     c        = _as_multiplier(contact_mult, N, "contact_mult")
     m        = _as_multiplier(infect_mult,  N, "infect_mult")
-    _, _, _, N_eff, inv_Neff = _kernel_base(f_t, populations, lw, lb, contact_mult)
+    _, _, _, _, inv_Neff = _kernel_base(f_t, populations, lw, lb, contact_mult)
     S_eff    = f_t.T @ S
-    # m ≡ 1 must give m̄ ≡ 1 EXACTLY; N_eff*(1/N_eff) is only 1 to rounding, so
-    # short-circuit rather than computing a ratio that is analytically one.
-    m_bar    = (np.ones(N) if infect_mult is None
-                else (f_t.T @ (populations * m)) * inv_Neff)  # presence-weighted mean m
     sum_w    = infect_profile[1:].sum()
     R_meet   = np.zeros(N)
     for l in range(N):
-        kappa = c[l] * (lw * f_t[l, l] + lb * (f_t[:, l].sum() - f_t[l, l]))
-        R_meet[l] = m_bar[l] * prob_peak * sum_w * S_eff[l] * kappa * inv_Neff[l]
+        chi_tilde = np.full(N, float(lb))
+        chi_tilde[l] = lw                            # infector resident in l is at home
+        R_meet[l] = (c[l] * prob_peak * sum_w * S_eff[l] * inv_Neff[l]
+                     * np.sum(f_t[:, l] * chi_tilde * m))
     return R_meet

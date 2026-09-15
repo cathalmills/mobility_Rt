@@ -49,29 +49,24 @@ def spectral_analysis(R_mat):
 
 
 def sensitivity_elasticity(R_mat):
-    """S_{kj}=∂ρ/∂R_{kj}=v_k w_j/(v^T w),  E_{kj}=(R_{kj}/ρ)*S_{kj}.
+    """Sensitivity, elasticity and eigenvalue condition number of ρ(R) (Eqs 29-33, 38).
 
-    Here v=left_eigvec (code) = stable distribution v* (manuscript),
-    w=right_eigvec (code) = reproductive value v (manuscript).
-
-    Condition number: κ(R(t)) = ||v||₂ ||w||₂ / |v·w|  (Eq 38 in ms).
-    Since np.linalg.eig returns unit-L2-norm vectors we have ||v||=||w||=1,
-    so κ = 1/|v·w|.  Note: this is the eigenvalue condition number, NOT the
-    matrix condition number np.linalg.cond().
+    In code orientation (R_mat[k, j] = R^{kj}, the transpose of the manuscript NGM):
+      v = spectral_analysis "left_eigvec"  = manuscript v* (stable distribution, Eq 25)
+      w = spectral_analysis "right_eigvec" = manuscript v  (reproductive value, Eq 26)
+      sensitivity[k, j] = v_k w_j / (vᵀw) = v_j v*_k / (vᵀv*) = s^{kj}     (Eq 31)
+      elasticity[k, j]  = (R_mat[k, j] / ρ) · sensitivity[k, j] = ε^{kj}  (Eq 33)
+      condition_number  = ||v||₂ ||w||₂ / |vᵀw|                           (Eq 38)
+    κ does not depend on how either eigenvector is scaled, so the real, sum-normalised
+    Perron vectors give it exactly.  It is the eigenvalue condition number, not
+    np.linalg.cond.
     """
     spec = spectral_analysis(R_mat)
     rho  = spec["rho"];  v = spec["left_eigvec"];  w = spec["right_eigvec"]
     vw   = max(float(v @ w), 1e-15)
     S_m  = np.outer(v, w) / vw
     E_m  = (R_mat / rho) * S_m if rho > 1e-15 else np.zeros_like(R_mat)
-    # Eigenvalue condition number (Eq 38): κ = ||v||₂ ||w||₂ / |v^T w|
-    # Use unnormalised eigenvectors for correct L2 norms
-    ev_r, evec_r = np.linalg.eig(R_mat)
-    ev_l, evec_l = np.linalg.eig(R_mat.T)
-    ir = int(np.argmax(np.abs(ev_r))); il = int(np.argmax(np.abs(ev_l)))
-    wr = evec_r[:, ir]; vl = evec_l[:, il]
-    denom = abs(float(vl @ wr))
-    kappa = float(np.linalg.norm(vl) * np.linalg.norm(wr)) / (denom + 1e-300)
+    kappa = float(np.linalg.norm(v) * np.linalg.norm(w) / abs(float(v @ w)))
     return {"sensitivity": S_m, "elasticity": E_m, "rho": rho,
             "condition_number": kappa}
 
@@ -86,29 +81,20 @@ def reactivity(R_mat):
 
 
 def amplification_envelope(R_mat, n_max=30):
-    """A(n)=‖R^n‖₂=σ_max(R^n).  Captures non-normal transient growth."""
+    """Transient amplification envelopes of R^n for n = 0..n_max.
+
+      A[n]  = ||R^n||₂ = σ_max(R^n)                                        (Eq 39)
+      A1[n] = ||R_ms^n||₁ = largest column sum of the manuscript NGM power  (Eq 40)
+            = largest row sum of R_mat^n in code orientation (R_mat = R_msᵀ)
+    """
     rho = R_system(R_mat)
     A   = np.zeros(n_max + 1)
+    A1  = np.zeros(n_max + 1)
     Rn  = np.eye(R_mat.shape[0])
     for n in range(n_max + 1):
-        A[n] = float(np.linalg.svd(Rn, compute_uv=False)[0])
-        Rn   = Rn @ R_mat
-    return {"A": A, "rho_n": rho ** np.arange(n_max + 1),
+        A[n]  = float(np.linalg.svd(Rn, compute_uv=False)[0])
+        A1[n] = float(np.abs(Rn).sum(axis=1).max())
+        Rn    = Rn @ R_mat
+    return {"A": A, "A1": A1, "rho_n": rho ** np.arange(n_max + 1),
             "n": np.arange(n_max + 1), "rho": rho}
 
-
-def convergence_cosine(incidence, R_matrices):
-    """cos(p(t), w(t)) where p=observed spatial distrib, w=dominant eigvec."""
-    T = incidence.shape[0]
-    cs = np.full(T, np.nan)
-    for t in range(T):
-        tot = incidence[t].sum()
-        if tot < 1:
-            continue
-        p = incidence[t] / tot
-        # stable distribution = right eigvec of Diekmann K^D = left eigvec of R_mat
-        w = spectral_analysis(R_matrices[t])["stable_distribution"]
-        d = np.linalg.norm(p) * np.linalg.norm(w)
-        if d > 1e-15:
-            cs[t] = float(p @ w) / d
-    return cs

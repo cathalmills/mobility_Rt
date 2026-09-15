@@ -7,18 +7,18 @@ name = "mobility_rt"
 version = "1.0.0"
 description = "Mobility-informed renewal equations for time-varying epidemic reproduction numbers on human mobility networks"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = { text = "CC-BY-4.0" }
 authors = [{ name = "Cathal Mills" }]
+# Versions that produced the manuscript's outputs are pinned in requirements-lock.txt.
 dependencies = [
     "numpy",
     "scipy",
     "matplotlib",
-    "pillow",
 ]
 
 [project.optional-dependencies]
-notebooks = ["jupyter"]
+test = ["pytest"]
 
 [project.scripts]
 mobility-rt-run = "mobility_rt.scripts.run_all:main"

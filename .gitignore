@@ -16,3 +16,7 @@ __pycache__/
 
 # Generated figure outputs (regenerate via `python3 -m mobility_rt.scripts.run_all`)
 out_figs/
+
+# Fix-plan baseline and numerical manifests (docs/FIX_PLAN.md P0.2)
+out_figs_baseline/
+out_manifest/

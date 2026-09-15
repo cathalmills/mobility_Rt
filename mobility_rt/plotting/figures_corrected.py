@@ -1,14 +1,12 @@
-"""mobility_rt.plotting.figures_corrected — redrawn manuscript Figures 2, 3 and 5.
+"""mobility_rt.plotting.figures_corrected — manuscript Figures 2, 3 and 5.
 
-Moved verbatim from the former top-level make_corrected_figures.py so that
-mobility_rt.scripts.run_all is self-contained: the corrected figures are now drawn
-from the SAME Scenario A simulation as every other figure, instead of a second
-simulation built by a separate script that could drift out of step.
+Drawn from the same Scenario A simulation (and its static-mobility twin, Figs SI7-SI9)
+as every other figure in mobility_rt.scripts.run_all.
 
 Provides:
-  plot_fig02_overview  manuscript Fig 2, tile-heatmap and 3-D surface variants
-  plot_fig03_taxonomy  manuscript Fig 3, tile-heatmap and 3-D surface variants
-  plot_fig04_spectral  manuscript Fig 5 (file name kept for continuity)
+  plot_fig02_overview  manuscript Fig 2 / SI7, tile-heatmap and 3-D surface variants
+  plot_fig03_taxonomy  manuscript Fig 3 / SI8, tile-heatmap and 3-D surface variants
+  plot_fig04_spectral  manuscript Fig 5 / SI9 (file name kept for continuity)
   set_modern_style     the Nature-friendly rcParams these three figures assume
 
 set_modern_style mutates the global matplotlib rcParams, so run_corrected_figures
@@ -30,6 +28,11 @@ import matplotlib.patheffects as pe
 from matplotlib.ticker import FormatStrFormatter, FuncFormatter, LogLocator, MaxNLocator, ScalarFormatter
 
 import mobility_rt as dt
+from mobility_rt.config import DOW_SCALE
+from mobility_rt.distributions import renewal_gt
+from mobility_rt.error_tables import ESTIMATOR_WINDOW, trailing_mean
+from mobility_rt.simulation import phase_days
+from mobility_rt.transmissibility import risk_averse_R, within_fraction
 
 # ── publication style (Nature-friendly) ────────────────────────────────────
 
@@ -100,7 +103,8 @@ OK = dt.OKABE_ITO
 
 def activity_location_prevalence(f_jk: np.ndarray, E_pde: np.ndarray) -> np.ndarray:
     """
-    Activity-location prevalence: sum_a sum_j f^{jl}(t) E^j(t,a).
+    Activity-location prevalence: sum_a sum_j f^{jl}(t) E^j(t,a), over the stored ages
+    a = 0..max_days-1.
 
     Code stores f[t,j,l]=f^{jl} and E_pde[t,j,a]=E^j(t,a).
     """
@@ -119,7 +123,12 @@ def home_mobility_series(f_jk: np.ndarray) -> np.ndarray:
 
 
 def infector_infectee_elasticity_series(R_mats: np.ndarray):
-    """Returns (T,N) ε^k_out=sum_j ε^{kj} and (T,N) ε^j_in=sum_k ε^{kj}."""
+    """Returns (T,N) ε^k_out = Σ_j ε^{kj} (Eq 34) and (T,N) ε^j_in = Σ_k ε^{kj} (Eq 35).
+
+    The two are the same vector for every matrix: both equal v_i v*_i / (vᵀv*), because
+    R v = ℛ v and v*ᵀ R = ℛ v*ᵀ (finding F05).  Both are returned so that Figs 2 and 3
+    can show that they coincide.
+    """
     T, N, _ = R_mats.shape
     inf_k = np.zeros((T, N))
     inf_j = np.zeros((T, N))
@@ -289,9 +298,11 @@ def _plot_time_location_tile(
     vmin=None,
     vmax=None,
 ):
-    """Z shape (T, Nloc)."""
+    """Z shape (T, Nloc); cells are centred on each day t.  NaN cells are drawn light grey."""
     Zt = Z.T
-    kw = dict(aspect="auto", origin="upper", extent=[-0.5, T - 0.5, Nloc - 0.5, -0.5], cmap=cmap, interpolation="nearest")
+    cm = plt.get_cmap(cmap).copy()
+    cm.set_bad("0.85")
+    kw = dict(aspect="auto", origin="upper", extent=[-0.5, T - 0.5, Nloc - 0.5, -0.5], cmap=cm, interpolation="nearest")
     if vmin is not None:
         kw["vmin"] = vmin
     if vmax is not None:
@@ -306,6 +317,7 @@ def _plot_time_location_tile(
     ax.set_ylabel(y_label, fontsize=9)
     _colorbar_right(ax, im, cbar_title)
     panel_label(ax, letter)
+    return im
 
 
 def _plot_time_location_surface(
@@ -323,12 +335,20 @@ def _plot_time_location_surface(
     vmin=None,
     vmax=None,
 ):
-    """3D surface: x=day t, y=location, z=Z(t,·)."""
+    """3D surface: x=day t, y=location, z=Z(t,·).  NaN values are not drawn.
+
+    The surface array Zt = Z.T has one row per location and one column per day, so
+    every location is kept (rstride=1) and days are thinned to about 80 (cstride).
+    """
     ax = fig.add_subplot(gs_cell, projection="3d")
     TT, LL = np.meshgrid(np.arange(T), np.arange(Nloc))
     Zt = Z.T
     if vmin is None or vmax is None:
-        zmin, zmax = np.nanpercentile(Z, [2, 98])
+        finite = np.asarray(Z, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        # An all-NaN panel (e.g. T_j undefined on every day of a short run) draws
+        # nothing; give it a nominal colour range instead of a NaN percentile.
+        zmin, zmax = np.percentile(finite, [2, 98]) if finite.size else (0.0, 1.0)
     else:
         zmin, zmax = vmin, vmax
     if not np.isfinite(zmax) or zmax <= zmin:
@@ -343,8 +363,8 @@ def _plot_time_location_surface(
         alpha=0.9,
         vmin=zmin,
         vmax=zmax,
-        rstride=max(1, T // 80),
-        cstride=1,
+        rstride=1,
+        cstride=max(1, T // 80),
     )
     ax.set_xlabel("Day $t$", fontsize=7, labelpad=4)
     ax.set_ylabel(y_label, fontsize=7, labelpad=4)
@@ -368,15 +388,15 @@ def plot_fig02_overview(
     f_jk: np.ndarray,
     gen_time_pmf: np.ndarray,
     max_days: int,
-    scenario_name: str,
     save_prefix: str,
     *,
     surface_3d: bool = False,
 ):
+    """Fig 2 (time-varying mobility) / Fig SI7 (static mobility)."""
     coords, pops, _, node_types, meta = city_data
     inc = sim["incidence"]
     R_mats = sim["R_matrices"]
-    S_series = sim["susceptibles"]
+    S_series = sim["S_start"]
     E_pde = sim["E_pde_state"]
     T, N = inc.shape
     loc = [f"L{i+1}" for i in range(N)]
@@ -451,7 +471,7 @@ def plot_fig02_overview(
             ax, prev_act, T, N, cbar_title=r"$\sum_a\sum_j f^{jl}E^j(t, a)$", letter="E", cmap="magma", y_label=r"Activity $l$"
         )
 
-    # F — S^l_eff
+    # F — S^l_eff at the start of day t (the S that R(t) uses)
     if surface_3d:
         _plot_time_location_surface(
             fig,
@@ -484,10 +504,8 @@ def plot_fig02_overview(
     ax2.spines["top"].set_visible(False)
     vld = R_sys > 0
     R_out_series = np.array([dt.R_outward(R_mats[t]) for t in range(T)])
-    E_t = np.array(
-        [np.sum(R_out_series[t] ** 2) / (np.sum(R_out_series[t]) + 1e-300) for t in range(T)]
-    )
-    vE = E_t > 0
+    E_t = risk_averse_R(R_out_series)
+    vE = np.isfinite(E_t) & (E_t > 0)
     ax.plot(np.where(vld)[0], R_sys[vld], color=OK[4], lw=1.2, label=r"$\mathcal{R}(t)$")
     ax.plot(np.where(vE)[0], E_t[vE], color=OK[6], lw=1.1, ls="--", label=r"$\mathcal{E}(t)$")
     ax.axhline(1.0, color="#555", ls="--", lw=0.85)
@@ -521,8 +539,8 @@ def plot_fig02_overview(
         vmax=vmax_e,
     )
 
-    # I — infectee elasticity ε^j_in(t) (always tile)
-    vmax_i = np.percentile(eps_in[eps_in > 0], 97) if (eps_in > 0).any() else 1.0
+    # I — infectee elasticity ε^j_in(t) (always tile).  Identical to H for every
+    # matrix (Eqs 34-35, finding F05); drawn on the same colour scale and labelled so.
     ax = fig.add_subplot(gs[2, 2])
     _plot_time_location_tile(
         ax,
@@ -531,11 +549,13 @@ def plot_fig02_overview(
         N,
         cbar_title=r"$\varepsilon^j_{\mathrm{in}}(t)$",
         letter="I",
-        cmap="magma",
+        cmap="YlOrRd",
         y_label=r"Infectee $j$",
         vmin=0,
-        vmax=vmax_i,
+        vmax=vmax_e,
     )
+    ax.set_title(r"Identical to H: $\varepsilon^i_{\mathrm{in}}=\varepsilon^i_{\mathrm{out}}$ (Eqs 34–35)",
+                 fontsize=7, pad=4)
     os.makedirs(os.path.dirname(save_prefix) or ".", exist_ok=True)
     path = f"{save_prefix}_02_overview{sfx}.pdf"
     plt.savefig(path, dpi=300, bbox_inches="tight")
@@ -551,18 +571,16 @@ def plot_fig03_taxonomy(
     city_data: tuple,
     R_independent: np.ndarray,
     gt_snaps: dict,
-    w_within: np.ndarray,
-    w_between: np.ndarray,
-    scenario_name: str,
+    gen_time_pmf: np.ndarray,
     save_prefix: str,
     *,
     surface_3d: bool = False,
 ):
+    """Fig 3 (time-varying mobility) / Fig SI8 (static mobility)."""
     inc = sim["incidence"]
     inc_mat = sim["incidence_matrix"]
     R_mats = sim["R_matrices"]
     R_meet_s = sim["R_meeting_series"]
-    coords, pops, _, node_types, meta = city_data
     T, N = inc.shape
     loc = [f"L{i+1}" for i in range(N)]
 
@@ -574,18 +592,16 @@ def plot_fig03_taxonomy(
 
     gt_p = gt_snaps["peak"]
     g_pw, g_out, g_in = gt_p["g_pairwise"], gt_p["g_outward"], gt_p["g_inward"]
-    days = np.arange(len(w_within))
-    g_univ = w_within / w_within.sum() if w_within.sum() > 0 else w_within.copy()
-    GT_univ = float(np.sum(days * g_univ))
+    days = np.arange(len(gen_time_pmf))
+    g_univ = renewal_gt(gen_time_pmf)   # p/Σ_{a≥1} p, the shape every GT reduces to
 
     eps_out, eps_in = infector_infectee_elasticity_series(R_mats)
     mean_eps_out = np.nanmean(eps_out, axis=0)
     mean_eps_in = np.nanmean(eps_in, axis=0)
     v_t, vstar_t = eigenvector_timeseries(R_mats)
 
-    T_ser = np.zeros((T, N))
-    for t_idx in range(T):
-        T_ser[t_idx] = dt.type_reproduction_numbers(R_mats[t_idx])
+    # T_j(t); NaN where undefined (ρ(R_JJ) >= 1), and kept NaN when drawn
+    T_ser = np.array([dt.type_reproduction_numbers(R_mats[t_idx]) for t_idx in range(T)])
 
     sfx = "_surface" if surface_3d else ""
     fig = plt.figure(figsize=(14.5, 10.2))
@@ -602,7 +618,7 @@ def plot_fig03_taxonomy(
         ax.plot(days, g_out[:, i_hub], color=OK[1], lw=1.1, ls="--", label=r"$g^k_{\mathrm{out}}$")
     if g_in[:, i_hub].sum() > 0.5:
         ax.plot(days, g_in[:, i_hub], color=OK[5], lw=1.1, ls=":", label=r"$g^j_{\mathrm{in}}$")
-    ax.plot(days, g_univ, color="#555", lw=1.5, ls="-", alpha=0.45, label=rf"$p/\int p$")
+    ax.plot(days, g_univ, color="#555", lw=1.5, ls="-", alpha=0.45, label=r"$p/\sum_{a\geq 1}p$")
     ax.set_xlabel("Age $a_E$ (days)")
     ax.set_ylabel("Probability")
     ax.legend(fontsize=6.5, ncol=2)
@@ -674,7 +690,8 @@ def plot_fig03_taxonomy(
             vmax=vmax_i,
         )
 
-    # D — elasticity rankings (time-mean marginals)
+    # D — time-mean elasticity marginals.  ε_out and ε_in are the same vector for
+    # every matrix (Eqs 34-35, F05), so every point lies on the diagonal.
     ax = fig.add_subplot(gs[0, 3])
     ax.scatter(mean_eps_out, mean_eps_in, s=55, c=np.arange(N), cmap="tab10", edgecolors="#222", linewidths=0.5)
     for j in range(N):
@@ -690,6 +707,8 @@ def plot_fig03_taxonomy(
     ax.plot([0, mx], [0, mx], color="#999", ls="--", lw=0.85, label="equal marginals")
     ax.set_xlabel(r"time-mean $\varepsilon^k_{\mathrm{out}}$")
     ax.set_ylabel(r"time-mean $\varepsilon^j_{\mathrm{in}}$")
+    ax.text(0.03, 0.97, "Identical by construction\n(Eqs 34–35): every point\nlies on the diagonal",
+            transform=ax.transAxes, fontsize=6.5, va="top", ha="left", color="#444")
     ax.legend(fontsize=6.5, loc="lower right")
     panel_label(ax, "D")
 
@@ -743,73 +762,72 @@ def plot_fig03_taxonomy(
     axh.set_xlabel(r"Infectee $j$")
     axh.set_ylabel(r"Infector $k$")
 
-    # I — R̂_ind vs R^j_in
-    ax = fig.add_subplot(gs[2, 0])
-    for j, lbl, col in zip(show_locs, show_lbls, [OK[0], OK[2], OK[5]]):
-        vi = ~np.isnan(R_independent[:, j])
-        vm = R_in_s[:, j] > 0
-        b = vi & vm
-        if b.sum() > 3:
-            ax.plot(np.where(b)[0], R_independent[b, j], "--", color=col, lw=1.0, alpha=0.75)
-            ax.plot(np.where(b)[0], R_in_s[b, j], "-", color=col, lw=1.0, label=lbl)
-    ax.axhline(1, color="#666", ls="--", lw=0.85)
-    h, lab = ax.get_legend_handles_labels()
-    h += [
-        Line2D([0], [0], color="0.35", lw=1.0, ls="-"),
-        Line2D([0], [0], color="0.35", lw=1.0, ls="--"),
-    ]
-    lab += [r"$R^j_{\mathrm{in}}$ (solid)", r"$\hat R^j_{\mathrm{ind}}$ (dashed)"]
-    ax.legend(handles=h, labels=lab, fontsize=6.5, ncol=1)
-    ax.set_xlabel("Day $t$")
-    ax.set_ylabel(r"$R$")
-    panel_label(ax, "I")
+    # I, J — R̂_ind (a sliding-window estimate) against the matching trailing means of
+    # R^j_in and R^k_out (decision D8)
+    win_lbl = f"{ESTIMATOR_WINDOW}-day trailing mean"
+    for letter, cell, series, ref_tex in (
+        ("I", gs[2, 0], R_in_s, r"\bar{R}^j_{\mathrm{in}}"),
+        ("J", gs[2, 1], R_out_s, r"\bar{R}^k_{\mathrm{out}}"),
+    ):
+        ax = fig.add_subplot(cell)
+        for j, lbl, col in zip(show_locs, show_lbls, [OK[0], OK[2], OK[5]]):
+            ref_j = trailing_mean(series[:, j], ESTIMATOR_WINDOW)
+            vi = np.isfinite(R_independent[:, j])
+            vm = np.isfinite(ref_j) & (ref_j > 0)
+            b = vi & vm
+            if b.sum() > 3:
+                ax.plot(np.where(b)[0], R_independent[b, j], "--", color=col, lw=1.0, alpha=0.75)
+                ax.plot(np.where(b)[0], ref_j[b], "-", color=col, lw=1.0, label=lbl)
+        ax.axhline(1, color="#666", ls="--", lw=0.85)
+        h, lab = ax.get_legend_handles_labels()
+        h += [
+            Line2D([0], [0], color="0.35", lw=1.0, ls="-"),
+            Line2D([0], [0], color="0.35", lw=1.0, ls="--"),
+        ]
+        lab += [rf"${ref_tex}$, {win_lbl} (solid)", r"$\hat R^j_{\mathrm{ind}}$ (dashed)"]
+        ax.legend(handles=h, labels=lab, fontsize=6.5, ncol=1)
+        ax.set_xlabel("Day $t$")
+        ax.set_ylabel(r"$R$")
+        panel_label(ax, letter)
 
-    # J — R̂_ind vs R^k_out
-    ax = fig.add_subplot(gs[2, 1])
-    for j, lbl, col in zip(show_locs, show_lbls, [OK[0], OK[2], OK[5]]):
-        vi = ~np.isnan(R_independent[:, j])
-        vo = R_out_s[:, j] > 0
-        b = vi & vo
-        if b.sum() > 3:
-            ax.plot(np.where(b)[0], R_independent[b, j], "--", color=col, lw=1.0, alpha=0.75)
-            ax.plot(np.where(b)[0], R_out_s[b, j], "-", color=col, lw=1.0, label=lbl)
-    ax.axhline(1, color="#666", ls="--", lw=0.85)
-    h2, lab2 = ax.get_legend_handles_labels()
-    h2 += [
-        Line2D([0], [0], color="0.35", lw=1.0, ls="-"),
-        Line2D([0], [0], color="0.35", lw=1.0, ls="--"),
-    ]
-    lab2 += [r"$R^k_{\mathrm{out}}$ (solid)", r"$\hat R^j_{\mathrm{ind}}$ (dashed)"]
-    ax.legend(handles=h2, labels=lab2, fontsize=6.5, ncol=1)
-    ax.set_xlabel("Day $t$")
-    ax.set_ylabel(r"$R$")
-    panel_label(ax, "J")
-
-    # K — type reproduction T_j(t)
+    # K — type reproduction numbers T_j(t); grey where undefined.  T_j diverges as
+    # ρ(R_JJ) → 1, so the colour range is taken from the 2nd-98th percentiles of the
+    # defined values, as for panels B, C and L.
+    undefined_txt = r"grey: $T_j$ undefined ($\rho(\mathbf{R}_{JJ})\geq 1$)"
+    T_finite = T_ser[np.isfinite(T_ser)]
+    vmin_T, vmax_T = ((float(np.percentile(T_finite, 2)), float(np.percentile(T_finite, 98)))
+                      if T_finite.size else (0.0, 1.0))
     if surface_3d:
-        _plot_time_location_surface(
+        ax_k = _plot_time_location_surface(
             fig,
             gs[2, 2],
-            np.nan_to_num(T_ser, nan=0.0),
+            T_ser,
             T,
             N,
             cbar_title=r"$T_j$",
             letter="K",
             cmap="plasma",
             y_label=r"Location $j$",
+            vmin=vmin_T,
+            vmax=vmax_T,
         )
+        ax_k.set_title(r"$T_j$ undefined ($\rho(\mathbf{R}_{JJ})\geq 1$): not drawn",
+                       fontsize=7, pad=2)
     else:
         ax = fig.add_subplot(gs[2, 2])
         _plot_time_location_tile(
             ax,
-            np.nan_to_num(T_ser, nan=0.0),
+            T_ser,
             T,
             N,
             cbar_title=r"$T_j$",
             letter="K",
             cmap="plasma",
             y_label=r"Location $j$",
+            vmin=vmin_T,
+            vmax=vmax_T,
         )
+        ax.set_title(undefined_txt, fontsize=7, pad=4)
 
     # L — R^l_meeting(t)
     posm = R_meet_s[R_meet_s > 0]
@@ -849,29 +867,26 @@ def plot_fig03_taxonomy(
     print(f"  Saved {path}")
 
 
-# ── Figure 4 (patched layout + formatters) ─────────────────────────────────
+# ── Figure 5 (file name fig_04_spectral) ───────────────────────────────────
 
 
-def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_within, w_between, max_days: int, save_prefix: str, *, show_dow: bool = True):
-    """Spectral figure with wider gutter for panel A twin axis and plain ticks on D/F.
+def plot_fig04_spectral(sim: dict, save_prefix: str, *, show_dow: bool = True):
+    """Fig 5 (time-varying mobility) / Fig SI9 (static mobility).
 
-    show_dow draws panel A's day-of-week mobility scaling on the twin axis.  Set it
-    False for a scenario whose mobility series is time-invariant: the static-mobility
-    twin never applies that scaling, so drawing it there would assert a weekly cycle
-    the run does not have.
+    show_dow draws panel A's day-of-week mobility factor on the twin axis (the daily
+    lognormal factor ξ_t is not shown).  Set it False for a scenario whose mobility
+    series is time-invariant: the static-mobility twin never applies that factor.
     """
     inc = sim["incidence"]
     R_mats = sim["R_matrices"]
-    coords, pops, dists, node_types, meta = city_data
     T, N = inc.shape
 
     R_sys = np.array([dt.R_system(R_mats[t]) for t in range(T)])
     specs = [dt.spectral_analysis(R_mats[t]) for t in range(T)]
     mix_ts = np.array([s["mixing_ratio"] for s in specs])
     sigma_ts = np.array([dt.reactivity(R_mats[t])["sigma"] for t in range(T)])
-    peak = int(inc.sum(axis=1).argmax())
-    early = max(1, peak // 3)
-    late = min(T - 1, peak + 30)
+    phases = phase_days(inc)
+    early, peak, late = phases["early"], phases["peak"], phases["late"]
 
     fig = plt.figure(figsize=(7.4, 7.8))
     # Extra column between A and B for gutter; taller middle row for C–E separation
@@ -897,12 +912,12 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
     vm = mix_ts > 0
     ax.plot(np.where(vm)[0], mix_ts[vm], color=OK[2], lw=1.05, label=r"$s(t)$", zorder=5)
     if show_dow:
-        dow_scale = np.array([1.00, 1.00, 1.00, 1.00, 0.95, 0.90, 0.75])
-        dow_pattern = np.array([dow_scale[t % 7] for t in range(T)])
-        ax2.plot(range(T), dow_pattern, color=OK[0], lw=1.05, ls="--", alpha=0.42, label="DoW scale", zorder=3)
-        ax2.set_ylabel("DoW scale", color=OK[0], fontsize=8)
+        dow_pattern = np.array([DOW_SCALE[t % 7] for t in range(T)])
+        ax2.plot(range(T), dow_pattern, color=OK[0], lw=1.05, ls="--", alpha=0.42,
+                 label="day-of-week factor", zorder=3)
+        ax2.set_ylabel(r"Day-of-week factor (no $\xi_t$)", color=OK[0], fontsize=7)
         ax2.tick_params(axis="y", labelcolor=OK[0], labelsize=7)
-        # Equally spaced right-hand ticks over the meaningful DoW range (0.75–1.0)
+        # Equally spaced right-hand ticks over the day-of-week range (0.75–1.0)
         ax2.set_ylim(0.7, 1.0)
         ax2.set_yticks([0.70, 0.80, 0.90, 1.00])
     else:
@@ -920,10 +935,10 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
     t_arr = np.arange(T)
     vR = R_sys > 0
     vsig = sigma_ts > 0
-    A1_1_ts = np.array([float(np.max(dt.R_outward(R_mats[t]))) for t in range(T)])
     R_out_b = np.array([dt.R_outward(R_mats[t]) for t in range(T)])
-    E_t_b = np.array([np.sum(R_out_b[t] ** 2) / (np.sum(R_out_b[t]) + 1e-300) for t in range(T)])
-    vEb = E_t_b > 0
+    A1_1_ts = R_out_b.max(axis=1)                 # A₁(1) = max_k R^k_out
+    E_t_b = risk_averse_R(R_out_b)                # Eq 42
+    vEb = np.isfinite(E_t_b) & (E_t_b > 0)
     vA1 = A1_1_ts > 0
     ax.plot(t_arr[vR], R_sys[vR], color=OK[4], lw=1.05, label=r"$\mathcal{R}(t)$")
     ax.plot(t_arr[vsig], sigma_ts[vsig], color=OK[5], lw=1.0, label=r"$\sigma(t)$")
@@ -949,22 +964,15 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
     ax.yaxis.set_major_formatter(yfmt)
     panel_label(ax, "B")
 
-    # C — amplification (span 0:2): ℓ2-norm A(n) solid + ℓ1-norm A1(n) dotted
+    # C — amplification (span 0:2): ℓ2 envelope A(n) solid, ℓ1 envelope A1(n) dotted
     ax = fig.add_subplot(gs[1, 0:2])
     n_max_env = 20
     for t_phase, phase_name, col in [(early, "early", OK[2]), (peak, "peak", OK[5]), (late, "late", OK[0])]:
         env = dt.amplification_envelope(R_mats[t_phase], n_max=n_max_env)
         rho_n = env["rho_n"]
-        # ℓ2-norm envelope A(n) = ‖R^n‖_2
         ax.plot(env["n"], env["A"] / (rho_n + 1e-300), color=col, lw=1.05,
                 label=f"$A(n)$ {phase_name}")
-        # ℓ1-norm envelope A1(n) = max row sum of R^n
-        Rn = np.eye(R_mats[t_phase].shape[0])
-        A1_n = np.zeros(n_max_env + 1)
-        for n in range(n_max_env + 1):
-            A1_n[n] = float(np.max(Rn.sum(axis=1)))
-            Rn = Rn @ R_mats[t_phase]
-        ax.plot(env["n"], A1_n / (rho_n + 1e-300), color=col, lw=0.8, ls=":",
+        ax.plot(env["n"], env["A1"] / (rho_n + 1e-300), color=col, lw=0.8, ls=":",
                 label=f"$\\mathcal{{A}}_1(n)$ {phase_name}")
     ax.axhline(1.0, color="#888", ls="--", lw=0.75)
     ax.set_xlabel("$n$ (generations)")
@@ -995,28 +1003,16 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
     ax.legend(fontsize=7)
     panel_label(ax, "D")
 
-    # E — condition number
+    # E — eigenvalue condition number κ (Eq 38), from the core, uncapped
     ax = fig.add_subplot(gs[1, 5:7])
-
-    def _cond_eigvec(R_m):
-        ev_r, evec_r = np.linalg.eig(R_m)
-        ev_l, evec_l = np.linalg.eig(R_m.T)
-        idx_r = int(np.argmax(np.abs(ev_r)))
-        idx_l = int(np.argmax(np.abs(ev_l)))
-        w = evec_r[:, idx_r]
-        v = evec_l[:, idx_l]
-        return 1.0 / (abs(float(v @ w)) + 1e-300)
-
-    cond_ts = np.minimum(np.array([_cond_eigvec(R_mats[t]) for t in range(T)]), 1e4)
+    cond_ts = np.array([dt.sensitivity_elasticity(R_mats[t])["condition_number"] for t in range(T)])
 
     def _kappa_log_tick(y, _pos):
         if y <= 0:
             return ""
-        if y >= 1000:
-            return f"{int(round(y))}"
         if y >= 10:
             return f"{int(round(y))}"
-        return f"{y:.1f}"
+        return f"{y:.2f}"
 
     ax.semilogy(np.arange(T), cond_ts, color=OK[1], lw=1.0, label=r"$\kappa(\mathbf{R})$")
     ax.axvline(peak, color="#777", ls="--", lw=0.8, alpha=0.75)
@@ -1030,19 +1026,11 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
     ax.legend(fontsize=7)
     panel_label(ax, "E")
 
-    # F — within fraction (twin right axis plain)
-    # Wider gutter (wspace) so the heatmap colorbar / twin-axis legend clear the
-    # right-hand bar panel; slightly narrower bar panel to compensate.
+    # F — within-location fraction of new infections (twin right axis plain)
     gs_e = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[2, :], width_ratios=[3, 1.05], wspace=0.9)
     ax = fig.add_subplot(gs_e[0, 0])
     ax_r = fig.add_subplot(gs_e[0, 1])
-    inc_mat = sim["incidence_matrix"]
-    col_sum = inc_mat.sum(axis=1)
-    diag = np.array([inc_mat[t].diagonal() for t in range(T)])
-    pi_within = np.where(col_sum > 0, diag / col_sum, np.nan)
-    total_mat = inc_mat.sum(axis=(1, 2))
-    total_diag = np.array([inc_mat[t].trace() for t in range(T)])
-    pi_overall = np.where(total_mat > 0, total_diag / total_mat, np.nan)
+    pi_within, pi_overall = within_fraction(sim["incidence_matrix"])
     im = ax.imshow(
         pi_within.T,
         aspect="auto",
@@ -1051,7 +1039,7 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
         vmin=0,
         vmax=1,
         interpolation="nearest",
-        extent=[0, T, N + 0.5, 0.5],
+        extent=[-0.5, T - 0.5, N + 0.5, 0.5],   # each cell centred on its day
     )
     ax.set_xlabel("Day $t$")
     ax.set_ylabel(r"Location $j$")
@@ -1060,7 +1048,7 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
     ax2 = ax.twinx()
     ax2.spines["right"].set_visible(True)
     ax2.spines["top"].set_visible(False)
-    mask_o = ~np.isnan(pi_overall)
+    mask_o = np.isfinite(pi_overall)
     ax2.plot(np.where(mask_o)[0], pi_overall[mask_o], color="#1a237e", lw=1.3, ls="-.", alpha=0.9, label=r"$\bar\pi(t)$")
     ax2.set_ylim(0, 1.0)
     ax2.set_ylabel(r"Overall $\bar\pi(t)$", color="#1a237e", fontsize=8)
@@ -1068,22 +1056,19 @@ def plot_fig04_spectral(sim: dict, city_data: tuple, scenario_name: str, w_withi
     yfmt2 = ScalarFormatter(useOffset=False)
     yfmt2.set_scientific(False)
     ax2.yaxis.set_major_formatter(yfmt2)
-    # π̄(t) legend inset INSIDE the heatmap (upper-right corner, where the dash-dot
-    # π̄(t) trace does not run), framed so it reads over the cells.
     ax2.legend(loc="upper right", fontsize=7, frameon=True, facecolor="white",
                framealpha=0.9, edgecolor="0.8", borderpad=0.3, handlelength=1.4)
-    # Colorbar in its own inset in the gutter, to the RIGHT of the heatmap's twin
-    # y-axis (so it no longer overlaps the "Overall π̄(t)" axis), left of the bar.
     cax = ax.inset_axes([1.26, 0.06, 0.05, 0.88])
     cbar = fig.colorbar(im, cax=cax)
     cbar.ax.set_title(r"$\pi_j(t)$", fontsize=8, pad=4)
     cbar.ax.tick_params(labelsize=7, length=2.5)
     panel_label(ax, "F")
     pi_j_avg = np.nanmean(pi_within, axis=0)
-    pi_overall_avg = float(np.nanmean(pi_overall[mask_o])) if mask_o.any() else 0.5
+    pi_overall_avg = float(np.mean(pi_overall[mask_o])) if mask_o.any() else np.nan
     bar_clrs = [plt.cm.RdYlGn(float(np.clip(v, 0, 1))) for v in pi_j_avg]
     ax_r.barh(range(1, N + 1), pi_j_avg, color=bar_clrs, height=0.72, edgecolor="none")
-    ax_r.axvline(pi_overall_avg, color="#1a237e", lw=1.1, ls="-.")
+    if np.isfinite(pi_overall_avg):
+        ax_r.axvline(pi_overall_avg, color="#1a237e", lw=1.1, ls="-.")
     ax_r.set_xlim(0, 1.05)
     ax_r.set_xlabel(r"$\bar\pi_j$", fontsize=8)
     ax_r.set_yticks(range(1, N + 1))
@@ -1108,35 +1093,19 @@ def run_corrected_figures(
     gt_snaps,
     gt_snaps_static,
     gen_time_pmf,
-    w_within,
-    w_between,
     max_days: int,
     scenario_name: str = "Dense urban",
     out_dir: str = "out_figs/corrected",
-    extra_scenarios=None,
 ):
-    """Draw the corrected Fig 2 / Fig 3 / Fig 5 set from ALREADY-simulated inputs.
+    """Draw the Fig 2 / Fig 3 / Fig 5 set from ALREADY-simulated inputs.
 
-    Takes the caller's simulations rather than building its own, so the corrected
-    figures depict exactly the same Scenario A (and its static-mobility twin) as the
-    rest of the pipeline.
+    Takes the caller's simulations rather than building its own, so these figures
+    depict exactly the same Scenario A (and its static-mobility twin) as the rest of
+    the pipeline.
 
-    Writes {out_dir}/fig_* for the time-varying run and {out_dir}/fig_SI_static_* for
-    the static-mobility run, matching the file names the former standalone script
-    produced.  Returns the list of prefixes written.
-
-    extra_scenarios draws the SAME three figures for further alternative scenarios —
-    the heterogeneous-transmissibility counterparts A-het / B-het / C-het and the
-    Scenario B / C baselines they are compared against — so every alternative gets
-    the identical panel set rather than a bespoke one.  Each entry is a dict:
-
-        {"sim": ..., "city_data": ..., "f_series": ..., "R_ind": ...,
-         "gt_snaps": ..., "name": "Dense urban (A-het)", "prefix": "fig_A_het"}
-
-    and produces {out_dir}/{prefix}_02_overview[_surface].pdf,
-    {prefix}_03_taxonomy[_surface].pdf and {prefix}_04_spectral.pdf.  Prefixes must
-    be distinct from each other and from the two built-in ones, or one scenario
-    would silently overwrite another's figures.
+    Writes {out_dir}/fig_* for the time-varying run (manuscript Figs 2, 3, 5) and
+    {out_dir}/fig_SI_static_* for the static-mobility run (Figs SI7-SI9).  Returns
+    the list of the two prefixes written.
 
     set_modern_style only sets the rcParams it cares about, so running it on top of
     the pipeline's own style would leave the pipeline's other settings (minor tick
@@ -1148,9 +1117,7 @@ def run_corrected_figures(
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    # One record per scenario, in the order the figures are written.  The first two
-    # are the built-in pair; keeping them first preserves the file names and the
-    # drawing order the standalone script produced.
+    # One record per scenario, in the order the figures are written.
     scenarios = [
         {"sim": sim, "city_data": city_data, "f_series": f_series, "R_ind": R_ind,
          "gt_snaps": gt_snaps, "name": scenario_name, "prefix": "fig",
@@ -1160,19 +1127,6 @@ def run_corrected_figures(
          "name": f"{scenario_name} (static mobility)", "prefix": "fig_SI_static",
          "show_dow": False},
     ]
-    for extra in (extra_scenarios or []):
-        missing = sorted({"sim", "city_data", "f_series", "R_ind", "gt_snaps",
-                          "name", "prefix"} - set(extra))
-        if missing:
-            raise KeyError(f"extra scenario {extra.get('name', '?')!r} is missing "
-                           f"key(s): {missing}")
-        scenarios.append(dict(extra))
-
-    prefixes = [sc["prefix"] for sc in scenarios]
-    dupes = sorted({p for p in prefixes if prefixes.count(p) > 1})
-    if dupes:
-        raise ValueError(f"duplicate corrected-figure prefix(es) {dupes}: each "
-                         f"scenario needs its own, or its figures are overwritten")
     for sc in scenarios:
         sc["path_prefix"] = os.path.join(out_dir, sc["prefix"])
 
@@ -1180,29 +1134,26 @@ def run_corrected_figures(
         matplotlib.rc_file_defaults()   # discard the caller's style first
         set_modern_style()
 
-        print("\n─── Corrected Figure 2 (tile heatmaps + 3D surfaces) ───")
+        print("\n─── Figure 2 (tile heatmaps + 3D surfaces) ───")
         for surface in (False, True):
             for sc in scenarios:
                 print(f"  [{sc['name']}]")
                 plot_fig02_overview(sc["sim"], sc["city_data"], sc["f_series"],
-                                    gen_time_pmf, max_days, sc["name"],
-                                    sc["path_prefix"], surface_3d=surface)
+                                    gen_time_pmf, max_days, sc["path_prefix"],
+                                    surface_3d=surface)
 
-        print("\n─── Corrected Figure 3 (tile heatmaps + 3D surfaces) ───")
+        print("\n─── Figure 3 (tile heatmaps + 3D surfaces) ───")
         for surface in (False, True):
             for sc in scenarios:
                 print(f"  [{sc['name']}]")
                 plot_fig03_taxonomy(sc["sim"], sc["city_data"], sc["R_ind"],
-                                    sc["gt_snaps"], w_within, w_between,
-                                    sc["name"], sc["path_prefix"],
+                                    sc["gt_snaps"], gen_time_pmf, sc["path_prefix"],
                                     surface_3d=surface)
 
-        print("\n─── Corrected Figure 4/5 (spectral) ───")
+        print("\n─── Figure 5 (spectral) ───")
         for sc in scenarios:
             print(f"  [{sc['name']}]")
-            plot_fig04_spectral(sc["sim"], sc["city_data"], sc["name"],
-                                w_within, w_between, max_days, sc["path_prefix"],
-                                show_dow=sc.get("show_dow", True))
+            plot_fig04_spectral(sc["sim"], sc["path_prefix"], show_dow=sc["show_dow"])
 
-    print(f"  Corrected figures written to {os.path.abspath(out_dir)}")
+    print(f"  Figures written to {os.path.abspath(out_dir)}")
     return [sc["path_prefix"] for sc in scenarios]

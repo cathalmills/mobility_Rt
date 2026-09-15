@@ -1,14 +1,31 @@
-"""mobility_rt.estimators."""
+"""mobility_rt.estimators — mobility-blind reproduction-number estimators (manuscript
+Eq 57, §3.2.2) and the network-level aggregations compared in Fig 4, Figs SI10-SI25
+and Tables SI1-SI2."""
 import numpy as np
 from mobility_rt.config import R_MIN_WINDOW_CASES, R_PRIOR_RATE, R_PRIOR_SHAPE
 from mobility_rt.kernel import R_outward, R_system
+from mobility_rt.transmissibility import risk_averse_R
 
 # Sliding-window width shared by every estimator here.  error_tables.ESTIMATOR_WINDOW
 # must match it; a test asserts they do.
 WINDOW = 7
 
 
-def estimate_R_independent(incidence, gen_time, window=7):
+def total_infectiousness(incidence, gen_time_pmf):
+    """Λ(t) = Σ_{a=1}^{len(p)-1} p(a) I(t-a), for (T,) or (T, N) incidence.
+
+    The same lag convention as the forward simulator's force of infection and as the
+    estimators below: ages a >= 1 only, and only days t - a >= 0.
+    """
+    inc = np.asarray(incidence, dtype=float)
+    lam = np.zeros_like(inc)
+    for t in range(inc.shape[0]):
+        for a in range(1, min(len(gen_time_pmf), t + 1)):
+            lam[t] += gen_time_pmf[a] * inc[t - a]
+    return lam
+
+
+def estimate_R_independent(incidence, gen_time, window=WINDOW):
     """Sliding-window Cori/EpiEstim independent reproduction-number estimator.
 
     EpiEstim-default prior Gamma(shape=1, scale=5) → prior mean 5; posterior mean over
@@ -41,7 +58,7 @@ def estimate_R_independent(incidence, gen_time, window=7):
     return R_est
 
 
-def compute_naive_R_aggregate(incidence_total, gen_time_pmf, window=7):
+def compute_naive_R_aggregate(incidence_total, gen_time_pmf, window=WINDOW):
     """Sliding-window independent estimator applied to aggregate (network-total) incidence.
 
     Treats the entire network as one homogeneous location, using the same Cori/EpiEstim
@@ -71,18 +88,28 @@ def compute_naive_R_aggregate(incidence_total, gen_time_pmf, window=7):
 
 
 def _compute_naive_suite(sim, city, gen_time_pmf):
-    """Compute every naive estimator for one simulation.
+    """Every network-level summary compared with ρ(R(t)) for one simulation.
 
-    Returns a dict with keys:
+    Returns a dict with keys
       rho_t, E_t, inc_tot, peak_t, T, N
-      ind_iw, ind_pw, ind_Rw, ind_am   (Part 1: per-loc independent R, then aggregated)
-      out_iw, out_pw, out_Rw, out_am   (Part 2: R^j_out, then aggregated)
-      agg                               (Part 3: sliding-window R on total incidence)
+      ind_am, ind_Lw, ind_pw, ind_Rw   four weightings of the per-location
+                                       independent estimates R̂^j_ind(t)
+      out_am, out_Lw, out_pw, out_Rw   the same four weightings of the model's
+                                       outward reproduction numbers R^j_out(t)
+      agg                              the sliding-window estimate on network-total
+                                       incidence
 
-    Nine series in all: four weightings of the per-location independent estimates,
-    the same four weightings of the model's outward reproduction numbers, and the
-    single aggregate-incidence estimate.  Every one is a candidate network-level
-    summary to be compared with the true rho(R(t)).
+    Weightings (w_j, normalised to sum to one):
+      am  arithmetic mean, w_j = 1/N
+      pw  resident population, w_j ∝ N_j
+      Lw  total infectiousness, w_j ∝ Λ_j (ref [68]).  An independent estimate
+          summarises its window [t-6, t], so its weight is Λ_j summed over that same
+          window; R^j_out(t) is instantaneous, so its weight is Λ_j(t).  Because
+          R̂^j_ind is the ratio of windowed incidence to windowed Λ_j, the
+          Λ-weighted mean of R̂^j_ind is the network-total incidence over the network
+          total Λ apart from the prior, i.e. close to agg by construction.
+      Rw  relative transmissibility, w_j ∝ the estimate itself, giving
+          Σ_j R_j² / Σ_j R_j; for R_out this is E(t) (Eq 42)
     """
     inc    = sim["incidence"]          # (T, N)
     R_mats = sim["R_matrices"]
@@ -93,13 +120,14 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
     inc_tot = inc.sum(axis=1)
     rho_t   = np.array([R_system(R_mats[t]) for t in range(T_len)])
     R_out_t = np.array([R_outward(R_mats[t]) for t in range(T_len)])   # (T, N)
+    E_t     = risk_averse_R(R_out_t)                                     # Eq 42
 
-    # E(t) = X(1,t) = R_out-weighted mean R_out  [= Σ(R^j_out)² / Σ R^j_out]
-    E_t = np.array([
-        np.sum(R_out_t[t]**2) / (np.sum(R_out_t[t]) + 1e-300)
-        for t in range(T_len)])
+    # Total infectiousness Λ_j(t) and its sum over each estimator window.
+    lam     = total_infectiousness(inc, gen_time_pmf)                    # (T, N)
+    lam_win = np.array([lam[max(0, t - WINDOW + 1):t + 1].sum(axis=0)
+                        for t in range(T_len)])                          # (T, N)
 
-    # ── Part 3: aggregate independent R on total incidence ───────────────
+    # ── aggregate independent R on total incidence ───────────────────────
     agg = compute_naive_R_aggregate(inc_tot, gen_time_pmf, window=WINDOW)
 
     # ── Per-location independent R estimates R_loc[t, j] ─────────────────
@@ -107,14 +135,14 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
     # definition of the same estimator cannot drift into existence.
     R_loc = estimate_R_independent(inc, gen_time_pmf, window=WINDOW)
 
-    # ── Part 1: per-location independent R, then aggregated ──────────────
+    # ── per-location independent R, then aggregated ──────────────────────
     # A network aggregate is reported only when EVERY location has an estimate.
     # Averaging over whichever locations happen to be defined would make the
     # aggregate's composition change from day to day, so differences between the
     # weighting schemes would partly reflect which locations were in the average
     # rather than how they were weighted.  All four weightings therefore share one
     # validity rule and are defined on exactly the same days.
-    ind_iw = np.full(T_len, np.nan)
+    ind_Lw = np.full(T_len, np.nan)
     ind_pw = np.full(T_len, np.nan)
     ind_Rw = np.full(T_len, np.nan)
     ind_am = np.full(T_len, np.nan)
@@ -123,10 +151,10 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
         if np.isnan(R_loc[t]).any():
             continue
         Rv = R_loc[t]
-        Iv = inc[t]
-        # i) incidence-weighted
-        if Iv.sum() > 1e-6:
-            ind_iw[t] = float(np.sum(Iv * Rv) / Iv.sum())
+        Lv = lam_win[t]
+        # i) total-infectiousness-weighted, over the estimate's own window
+        if Lv.sum() > 1e-6:
+            ind_Lw[t] = float(np.sum(Lv * Rv) / Lv.sum())
         # ii) population-weighted
         ind_pw[t] = float(np.sum(w_pop * Rv))
         # iii) relative-transmissibility (self-)weighted: weight each independent
@@ -138,12 +166,12 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
         # iv) arithmetic mean
         ind_am[t] = float(Rv.mean())
 
-    # ── Part 2: R_out from model, aggregated ─────────────────────────────
-    out_iw = np.full(T_len, np.nan)
+    # ── R_out from the model, aggregated ─────────────────────────────────
+    out_Lw = np.full(T_len, np.nan)
     out_pw = np.zeros(T_len)
     for t in range(T_len):
-        if inc_tot[t] > 1e-6:
-            out_iw[t] = float(np.sum(inc[t] * R_out_t[t]) / inc_tot[t])
+        if lam[t].sum() > 1e-6:
+            out_Lw[t] = float(np.sum(lam[t] * R_out_t[t]) / lam[t].sum())
         out_pw[t] = float(np.sum(w_pop * R_out_t[t]))
 
     out_Rw = E_t.copy()            # R_out-weighted mean R_out = E(t) by definition
@@ -156,11 +184,11 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
         "peak_t":  int(inc_tot.argmax()),
         "T":       T_len,
         "N":       N,
-        "ind_iw":  ind_iw,
+        "ind_Lw":  ind_Lw,
         "ind_pw":  ind_pw,
         "ind_Rw":  ind_Rw,
         "ind_am":  ind_am,
-        "out_iw":  out_iw,
+        "out_Lw":  out_Lw,
         "out_pw":  out_pw,
         "out_Rw":  out_Rw,
         "out_am":  out_am,

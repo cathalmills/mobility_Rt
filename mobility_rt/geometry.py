@@ -52,18 +52,20 @@ def generate_city(n_locations=10, scenario="lagos", seed=42):
         decay_scale = 7.0
 
     elif scenario == "zambia":
-        # Types: 1 capital, 1 peri-capital, 1 urban-industrial, 1 semi-urban,
-        #        rest split rural/remote
+        # Types, in node order: capital, peri-capital, urban-industrial, a block of
+        # semi-urban, a block of rural, a block of remote-rural, and one final rural
+        # node.  For N = 10 this is [capital, peri-capital, urban-industrial,
+        # semi-urban, rural, rural, rural, remote-rural, remote-rural, rural]
+        # (Fig SI3).  For small N, where the blocks' minimum sizes exceed N, the list
+        # is cut to N from the end.
         n_remote = max(1, N // 5)
         n_rural  = max(1, N // 3)
-        n_urban  = N - 4 - n_rural - n_remote
-        type_seq = (["capital"] + ["peri-capital"] + ["urban-industrial"] +
-                    ["semi-urban"] * max(1, n_urban) +
+        n_semi   = max(1, N - 4 - n_rural - n_remote)
+        type_seq = (["capital", "peri-capital", "urban-industrial"] +
+                    ["semi-urban"] * n_semi +
                     ["rural"] * n_rural +
-                    ["remote-rural"] * n_remote)
-        type_seq = type_seq[:N]
-        while len(type_seq) < N:
-            type_seq.append("rural")
+                    ["remote-rural"] * n_remote +
+                    ["rural"])[:N]
         node_types = type_seq
 
         # Spatial: spread over ~600 km

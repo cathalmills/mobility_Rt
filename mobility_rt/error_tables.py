@@ -19,8 +19,8 @@ resolution.  A Cori/EpiEstim estimate summarises the ESTIMATOR_WINDOW days endin
 at t, so it is scored against the matching trailing mean of rho; a scheme carrying
 no window is scored against rho itself.  rho oscillates with the day-of-week
 commuting cycle, so scoring a smoothed estimate against an unsmoothed reference
-charges it for smoothing and inflates its error several-fold.  Which schemes are
-windowed is declared once, in SCHEMES.
+would charge it for its smoothing and its delay rather than for spatial aggregation
+(decision D8).  Which schemes are windowed is declared once, in SCHEMES.
 
 COMMON DAY MASK.  Within a scenario every scheme is scored on exactly the same
 days: a day counts only when every scheme has a finite estimate there AND both
@@ -50,10 +50,9 @@ from mobility_rt.estimators import WINDOW as _EST_WINDOW, _compute_naive_suite
 RHO_FLOOR = 0.05
 
 # Width of the sliding window used by the Cori/EpiEstim estimators.  A windowed
-# estimate summarises the window [t-w+1, t], so it must be scored against the
-# matching trailing mean of rho(R(t)) and NOT against rho at day t alone: rho
-# oscillates with the day-of-week commuting cycle, and charging a smoother for
-# smoothing inflates its error by up to a factor of six here.
+# estimate summarises the window [t-w+1, t], so it is scored against the matching
+# trailing mean of rho(R(t)), not against rho at day t alone (decision D8).  The
+# delay a window introduces is reported separately, as a threshold-crossing lag.
 ESTIMATOR_WINDOW = _EST_WINDOW
 
 # windowed=True  -> scored against the ESTIMATOR_WINDOW trailing mean of rho
@@ -61,16 +60,17 @@ ESTIMATOR_WINDOW = _EST_WINDOW
 Scheme = namedtuple("Scheme", "key plain tex windowed")
 
 SCHEMES = [
-    Scheme("agg",    "Aggregate incidence",              r"$\hat{R}_{\mathrm{agg}}$",                       True),
-    Scheme("ind_am", "Arithmetic mean, independent",     r"$R^{j}_{\mathrm{ind},\mathrm{am}}$",             True),
-    Scheme("ind_iw", "Incidence-weighted, independent",  r"$R^{j}_{\mathrm{ind},\mathrm{iw}}$",             True),
-    Scheme("ind_pw", "Population-weighted, independent", r"$R^{j}_{\mathrm{ind},\mathrm{pw}}$",             True),
-    Scheme("ind_Rw", "R-weighted, independent",          r"$R^{j}_{\mathrm{ind},\mathrm{Rw}}$",             True),
-    Scheme("out_am", "Arithmetic mean, outward",         r"$\hat{R}^{\mathrm{out}}_{\mathrm{am}}$",         False),
-    Scheme("out_iw", "Incidence-weighted, outward",      r"$\hat{R}^{\mathrm{out}}_{\mathrm{iw}}$",         False),
-    Scheme("out_pw", "Population-weighted, outward",     r"$\hat{R}^{\mathrm{out}}_{\mathrm{pw}}$",         False),
-    Scheme("out_Rw", "R-weighted, outward (= E(t))",
-           r"$\hat{R}^{\mathrm{out}}_{\mathrm{Rw}}=\mathcal{E}(t)$",                                      False),
+    Scheme("agg",    "Aggregate incidence",                    r"$\hat{R}_{\mathrm{agg}}$",                        True),
+    Scheme("ind_am", "Arithmetic mean, independent",           r"$R^{j}_{\mathrm{ind},\mathrm{am}}$",              True),
+    Scheme("ind_Lw", "Infectiousness-weighted, independent",   r"$R^{j}_{\mathrm{ind},\Lambda\mathrm{w}}$",        True),
+    Scheme("ind_pw", "Population-weighted, independent",       r"$R^{j}_{\mathrm{ind},\mathrm{pw}}$",              True),
+    Scheme("ind_Rw", "Relative-transmissibility-weighted, independent",
+           r"$R^{j}_{\mathrm{ind},\mathrm{Rw}}$",                                                                 True),
+    Scheme("out_am", "Arithmetic mean, outward",               r"$\hat{R}^{\mathrm{out}}_{\mathrm{am}}$",          False),
+    Scheme("out_Lw", "Infectiousness-weighted, outward",       r"$\hat{R}^{\mathrm{out}}_{\Lambda\mathrm{w}}$",    False),
+    Scheme("out_pw", "Population-weighted, outward",           r"$\hat{R}^{\mathrm{out}}_{\mathrm{pw}}$",          False),
+    Scheme("out_Rw", "Relative-transmissibility-weighted, outward (= E(t))",
+           r"$\hat{R}^{\mathrm{out}}_{\mathrm{Rw}}=\mathcal{E}(t)$",                                              False),
 ]
 
 # Periods the module can score.  "decline" is not written as its own table but is
@@ -107,26 +107,30 @@ def references(rho, window=ESTIMATOR_WINDOW):
     return {True: trailing_mean(rho, window), False: rho}
 
 
-def _period_masks(suite, refs=None):
+def _period_masks(suite, targets=("rho_t",)):
     """Common per-day masks for one scenario: {period: boolean array}.
 
-    A day is usable when EVERY scheme has a finite estimate there, and when EVERY
-    reference a scheme might be scored against is finite and above the noise floor.
-    Requiring all of them up front is what makes the "identical set of days"
+    A day is usable when rho(R(t)) is above the noise floor, EVERY scheme has a finite
+    estimate there, and, for each target series named in `targets` (keys of the
+    suite, "rho_t" and optionally "E_t"), both references a scheme might be scored
+    against (the target itself and its trailing mean) are finite and above the noise
+    floor.  Requiring all of them up front is what makes the "identical set of days"
     guarantee exact: if a windowed scheme silently dropped days its reference did
     not cover, its column would be scored on an easier subset than the rest and the
     reported day count would overstate what was used.  It also keeps the relative
     error's denominator safely away from zero.
 
-    refs defaults to references(rho); pass the same dict the caller scores with.
+    The periods are always defined by rho(R(t)): growth is rho > 1.  With the default
+    targets these are exactly the masks behind Tables SI1-SI2.
     """
     rho    = np.asarray(suite["rho_t"], dtype=float)
     usable = rho > RHO_FLOOR
     for sch in SCHEMES:
         usable &= np.isfinite(np.asarray(suite[sch.key], dtype=float))
-    for ref in (references(rho) if refs is None else refs).values():
-        ref = np.asarray(ref, dtype=float)
-        usable &= np.isfinite(ref) & (ref > RHO_FLOOR)
+    for key in targets:
+        for ref in references(suite[key]).values():
+            ref = np.asarray(ref, dtype=float)
+            usable &= np.isfinite(ref) & (ref > RHO_FLOOR)
     return {"full":    usable,
             "growth":  usable & (rho > 1.0),
             "decline": usable & (rho <= 1.0)}
@@ -158,6 +162,19 @@ def threshold_crossing_day(series):
     return int(last_above + 1 + later[0])
 
 
+def scored_crossing_day(series, mask):
+    """threshold_crossing_day of `series`, counting only the days where mask is True.
+
+    Decision D10: an estimator's crossing is taken on the days the tables and figures
+    score (every scheme and reference defined, rho above the noise floor).  In the
+    far tail a sliding-window estimate rests on fractions of a case, the prior
+    dominates and the estimate can drift back above 1; those days would otherwise
+    decide when the estimate "settles" below 1.
+    """
+    x = np.asarray(series, dtype=float)
+    return threshold_crossing_day(np.where(np.asarray(mask, dtype=bool), x, np.nan))
+
+
 def compute_error_table(scenarios, gen_time_pmf):
     """Mean relative error of every scheme, for every scenario, in both periods.
 
@@ -180,7 +197,7 @@ def compute_error_table(scenarios, gen_time_pmf):
         suite = _compute_naive_suite(sim, city, gen_time_pmf)
         rho   = np.asarray(suite["rho_t"], dtype=float)
         refs  = references(rho)
-        masks = _period_masks(suite, refs)
+        masks = _period_masks(suite)
         for period in PERIODS:
             m = masks[period]
             n = int(m.sum())

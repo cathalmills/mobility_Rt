@@ -32,12 +32,16 @@ def compute_generation_times(f_t, S, populations, prob_peak, p_aE,
     the normalisation exactly as S_j and base_K do: the forward generation time
     stays universal under spatial heterogeneity, and only R_{kj} changes.  A
     location-dependent generation time would require a location-dependent PROFILE
-    SHAPE p_k(a_E), which this model does not have.  What does vary across space is
-    the REALISED (backward) generation interval — see realised_generation_times.
+    SHAPE p_k(a_E), which this model does not have.
+
+    S is the susceptible vector the snapshot is taken at; pass sim["S_start"][t]
+    to match R_matrices[t].  p_aE must have length max_days.
 
     Both multipliers default to None (≡ 1), reproducing the homogeneous model.
     """
     N    = len(populations)
+    if len(p_aE) != max_days:
+        raise ValueError(f"p_aE has length {len(p_aE)} but max_days = {max_days}")
     base_K, _, _, _, _ = _kernel_base(f_t, populations, lw, lb, contact_mult)
     m    = _as_multiplier(infect_mult, N, "infect_mult")
 
@@ -72,14 +76,13 @@ def compute_generation_times(f_t, S, populations, prob_peak, p_aE,
         if R_in[j] > 1e-15:
             g_in[:, j] = K_in[:, j] / R_in[j]
 
-    # Network-level: g_net(a) — universal p_aE/∫p
-    K_tot = K_series.sum(axis=(1, 2));  R_tot = R_mat.sum()
-    g_net = K_tot / R_tot if R_tot > 1e-15 else np.zeros(max_days)
+    # Network level: Eqs 27-28, the pairwise kernels weighted by the sensitivities
+    # s^{kj} = v_j v*_k / (vᵀv*).  Under this separable kernel it equals p/∫p too.
+    g_net = eigenvector_weighted_gt(K_series, R_mat)
 
     # Meeting-location: g^l_meeting(a) — same universal shape.  R^l_meeting is taken
-    # from compute_R_meeting rather than re-derived here, so the meeting-location
-    # κ_eff(l) = c[l]·(lw·f[l,l] + lb·Σ_{k≠l} f[k,l]) and the presence-weighted
-    # infectiousness m̄[l] cannot drift between the two implementations.
+    # from compute_R_meeting (Eq 50) rather than re-derived here, so the two cannot
+    # drift apart.
     R_meet = compute_R_meeting(f_t, S, populations, prob_peak, p_aE, lw, lb,
                                contact_mult, infect_mult)
     K_meet = np.zeros((max_days, N))
@@ -96,107 +99,25 @@ def compute_generation_times(f_t, S, populations, prob_peak, p_aE,
             "K_series": K_series, "R_matrix": R_mat, "R_meeting": R_meet}
 
 
-def realised_generation_times(E_pde, incidence_matrix, p_aE):
-    """Backward (cohort) generation intervals actually realised in a simulation.
-
-    compute_generation_times returns the FORWARD generation time built into the
-    kernel, which is universal: every (k,j) pair at every time has the same shape
-    p(a_E)/∫p, with or without spatial heterogeneity in contact rate and
-    transmissibility.  The distribution an analyst would actually reconstruct from
-    transmission pairs is the BACKWARD one — how long ago the infector of each new
-    case was itself infected — and that is NOT universal.  It reweights p(a_E) by
-    the infector's own infection-age composition, so it is early-shifted while a
-    location is growing and late-shifted while it is declining.  Because local
-    epidemics peak at different times, it varies across space and over time.
-
-    New infections at t attributable to an infector resident in k of infection age a
-    are proportional to base_K[k,j]·m[k]·E^k(t,a)·p(a) (the simulator's boundary
-    condition, resolved by age).  Splitting that product gives an age weight that
-    depends on k only,
-
-        φ_k(t,a) ∝ E^k(t,a) · p(a),   a ≥ 1,
-
-    so the infector-side backward GT needs nothing but the infection-age state, and
-    the infectee-side and network distributions are mixtures of the φ_k with weights
-    given by the pairwise incidence E^{kj}(t) already stored by the simulator.  No
-    part of this reconstruction re-derives the kernel, so it stays exact under any
-    contact_mult / infect_mult.
-
-    Parameters
-    ----------
-    E_pde : (T, N, max_days)      sim["E_pde_state"], E^k(t,a).
-    incidence_matrix : (T, N, N)  sim["incidence_matrix"], E^{kj}(t) as [t, k, j].
-    p_aE : (max_days,)            infectiousness profile p(a_E).
-
-    Returns
-    -------
-    dict with, for infector k, infectee j and the network as a whole, the backward
-    GT pmf over a_E (rows sum to 1 where defined, to 0 where no transmission is
-    happening) and its mean in days (NaN where undefined):
-      g_infector (T,N,max_days)  mean_infector (T,N)
-      g_infectee (T,N,max_days)  mean_infectee (T,N)
-      g_network  (T,max_days)    mean_network  (T,)
-    """
-    E_pde = np.asarray(E_pde, dtype=float)
-    incidence_matrix = np.asarray(incidence_matrix, dtype=float)
-    p_aE = np.asarray(p_aE, dtype=float)
-    if E_pde.ndim != 3:
-        raise ValueError(f"E_pde must be (T, N, max_days), got shape {E_pde.shape}")
-    T, N, A = E_pde.shape
-    if p_aE.shape != (A,):
-        raise ValueError(f"p_aE must have length {A}, got {p_aE.shape}")
-    if incidence_matrix.shape != (T, N, N):
-        raise ValueError(f"incidence_matrix must be ({T}, {N}, {N}), "
-                         f"got {incidence_matrix.shape}")
-    days = np.arange(A, dtype=float)
-
-    def _norm(W):
-        """Normalise the last axis where it carries mass; zero rows elsewhere."""
-        tot = W.sum(axis=-1)
-        out = np.zeros_like(W)
-        ok  = tot > 0.0
-        out[ok] = W[ok] / tot[ok][..., np.newaxis]
-        return out, ok
-
-    # φ_k(t,a) ∝ E^k(t,a)·p(a), ages a ≥ 1 (a = 0 cannot be an infector age here,
-    # exactly as in compute_R_matrix and the forward simulator).
-    W_inf = E_pde * p_aE[np.newaxis, np.newaxis, :]
-    W_inf[:, :, 0] = 0.0
-    g_infector, ok_inf = _norm(W_inf)
-
-    # Infectee j mixes the infector distributions with the pairwise incidence it
-    # actually received: b_j(t,a) = Σ_k E^{kj}(t)·φ_k(t,a) / Σ_k E^{kj}(t).
-    W_intee = np.einsum("tkj,tka->tja", incidence_matrix, g_infector)
-    g_infectee, ok_intee = _norm(W_intee)
-
-    # Network: the same mixture over every infectee as well.
-    W_net = np.einsum("tja->ta", W_intee)
-    g_network, ok_net = _norm(W_net)
-
-    def _mean(g, ok):
-        mu = g @ days
-        mu[~ok] = np.nan
-        return mu
-
-    return {"g_infector":   g_infector,
-            "g_infectee":   g_infectee,
-            "g_network":    g_network,
-            "mean_infector": _mean(g_infector, ok_inf),
-            "mean_infectee": _mean(g_infectee, ok_intee),
-            "mean_network":  _mean(g_network,  ok_net)}
-
-
 def eigenvector_weighted_gt(K_series, R_mat):
-    """
-    g̃(a_E) = Σ_{k,j} [v_k w_j / (v^T w)] K_{kj}(a_E) / ρ  [sensitivity-weighted GT]
+    """Network kernel and generation-time distribution, manuscript Eqs 27-28.
+
+      K_network(a_E) = Σ_j Σ_k v_j v*_k K^{kj}(a_E) / (vᵀv*)        (Eq 27)
+      g_network(a_E) = K_network(a_E) / ℛ                           (Eq 28)
+
+    K_series[a, k, j] = K^{kj}(a_E) (infector k, infectee j) and R_mat[k, j] = R^{kj},
+    the code orientation, i.e. the transpose of the manuscript NGM.  So the
+    manuscript's v (reproductive value, Eq 26) is spectral_analysis "right_eigvec"
+    and v* (stable distribution, Eq 25) is "left_eigvec", and the weight on K^{kj}
+    is the sensitivity s^{kj} of Eq 31.
+
+    When Σ_a K^{kj}(a) = R^{kj} for every pair, Σ_a g_network(a) = Σ_{kj} ε^{kj} = 1,
+    so no renormalisation is applied.  Returns zeros when ℛ = 0.
     """
     spec = spectral_analysis(R_mat)
     rho  = spec["rho"]
     if rho < 1e-15:
         return np.zeros(K_series.shape[0])
-    v, w = spec["left_eigvec"], spec["right_eigvec"]
-    vw   = max(float(v @ w), 1e-15)
-    S_mat  = np.outer(v, w) / vw
-    g_t    = np.einsum("kj,akj->a", S_mat, K_series) / rho
-    tot    = g_t.sum()
-    return g_t / tot if tot > 1e-15 else g_t
+    vstar, v = spec["left_eigvec"], spec["right_eigvec"]
+    s = np.outer(vstar, v) / float(v @ vstar)       # s[k, j] = v_j v*_k / (vᵀv*)
+    return np.einsum("kj,akj->a", s, K_series) / rho
