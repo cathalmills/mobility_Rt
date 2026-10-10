@@ -10,7 +10,7 @@ COVID_PARAMS = {
     # λ_W, contacts per person per day (manuscript §2.4, ref [60]: POLYMOD, Mossong
     # et al. 2008).  The calibration rescales λ_W and λ_B by one common factor, so
     # this value and prob_transmission_peak have no effect on any output; only
-    # λ_B/λ_W is identified (finding F01).
+    # λ_B/λ_W is identified.
     "base_contact_rate":      13.03,
     "prob_transmission_peak": 0.035,
     # Calibration target: ρ(R) for a fully susceptible population (S = N) under the
@@ -19,10 +19,26 @@ COVID_PARAMS = {
 }
 
 
-R_PRIOR_SHAPE = 1.0     # Gamma prior shape a  (EpiEstim default)
+
+# For the independent estimator, a simple Gamma prior, deliberately NOT EpiEstim's
+# default Gamma(shape 1, rate 0.2) (prior mean 5, sd 5).  That default leans high so
+# that a practitioner does not falsely declare control; here the data are a
+# deterministic PDE with no counting noise, so the prior carries no uncertainty and
+# only adds pseudo-counts: relative bias against the plain ratio ΣI/ΣΛ is
+# a(1 − R/m)/ΣI for prior shape a and mean m.  With m = 5 that bias is always
+# upward and largest exactly where R is smallest, i.e. in the decline and the tail
+# where the threshold crossings and the false-action zone are scored.
+#
+# Prior mean m = 1 instead, so the posterior mean is a weighted average
+#   R̂ = w·1 + (1 − w)·ΣI/ΣΛ,   w = rate/(rate + ΣΛ),
+# whose sign relative to 1 is that of the data ratio: the prior can shrink |R̂ − 1|
+# but can never move a threshold crossing.  Shape stays at 1, one pseudo-case, so
+# the prior is no stronger than EpiEstim's; only its centre moves.  Gamma(1, 1)
+# matches the mean and sd of EpiNow2's default Rt prior (lognormal, mean 1, sd 1).
+R_PRIOR_SHAPE = 1.0     # Gamma prior shape a
 
 
-R_PRIOR_RATE  = 0.2     # Gamma prior rate 1/scale  →  prior mean a/rate = 5
+R_PRIOR_RATE  = 1.0     # Gamma prior rate 1/scale  →  prior mean a/rate = 1
 
 
 # An estimate is reported only where at least ONE case falls in the window.
@@ -30,8 +46,11 @@ R_PRIOR_RATE  = 0.2     # Gamma prior rate 1/scale  →  prior mean a/rate = 5
 # This is a unit, not a tuned parameter.  A case count below one is not observable:
 # the deterministic PDE decays to fractions of a case in the tail, which no
 # surveillance system could ever record as anything but zero.  Left in, those
-# fractions carry no information, the posterior collapses onto the prior mean of 5,
-# and the estimator climbs away from the true R(t) in the tail.
+# fractions carry no information and the posterior collapses onto the prior mean,
+# so the estimate reports the prior rather than the data.  With the prior mean at 1
+# that limit is the threshold itself, which is less damaging than the mean-5 default
+# (whose tail estimate drifts above 1 and would fake a resurgence), but it is still
+# the prior speaking and not the data.
 #
 # Any LARGER value would be arbitrary, and a larger value is also actively harmful
 # when per-location estimates are aggregated: the aggregate is then taken over
@@ -48,21 +67,20 @@ BETWEEN_FRACTION = 0.30
 
 # Day-of-week multipliers on each location's away-from-home fraction, Monday first
 # (day 0 is a Monday).  Appendix A of the 11 Sep 2026 manuscript states Sunday = 0.80;
-# the code and every figure use 0.75, and the manuscript is to be corrected (D7).
+# the code and every figure use 0.75, and the manuscript is to be corrected.
 DOW_SCALE = (1.00, 1.00, 1.00, 1.00, 0.95, 0.90, 0.75)
 
-# Clip applied to the shared daily lognormal factor ξ_t (not stated in the manuscript;
-# decision D19).
+# Clip applied to the shared daily lognormal factor ξ_t (not stated in the manuscript).
 XI_CLIP = (0.50, 1.80)
 
 # Cap on a location's scaled away-from-home fraction (Appendix A).
 AWAY_FRACTION_CAP = 0.95
 
 # Distances below this are raised to it before the exp(-d/δ) distance weight, so
-# co-located nodes do not dominate (not stated in the manuscript; decision D19).
+# co-located nodes do not dominate (not stated in the manuscript).
 DISTANCE_FLOOR_KM = 0.5
 
-# σ_ξ of the daily lognormal mobility factor per scenario (decision D19).
+# σ_ξ of the daily lognormal mobility factor per scenario (not stated in the manuscript).
 DAY_VARIATION_SD = {"A": 0.15, "B": 0.12, "C": 0.15}
 
 

@@ -1,6 +1,6 @@
 """mobility_rt.estimators — mobility-blind reproduction-number estimators (manuscript
-Eq 57, §3.2.2) and the network-level aggregations compared in Fig 4, Figs SI10-SI25
-and Tables SI1-SI2."""
+Eq 57, §3.2.2) and the network-level aggregations compared in Fig 4, the per-scheme SI
+figure set (one per aggregation scheme) and Tables SI1-SI2."""
 import numpy as np
 from mobility_rt.config import R_MIN_WINDOW_CASES, R_PRIOR_RATE, R_PRIOR_SHAPE
 from mobility_rt.kernel import R_outward, R_system
@@ -28,12 +28,18 @@ def total_infectiousness(incidence, gen_time_pmf):
 def estimate_R_independent(incidence, gen_time, window=WINDOW):
     """Sliding-window Cori/EpiEstim independent reproduction-number estimator.
 
-    EpiEstim-default prior Gamma(shape=1, scale=5) → prior mean 5; posterior mean over
-    the window W = [t-window+1, t] is
+    Gamma(shape 1, rate 1) prior → prior mean 1 (see mobility_rt.config for why not
+    EpiEstim's default mean of 5); posterior mean over the window W = [t-window+1, t] is
       R̂_j(t) = (R_PRIOR_SHAPE + Σ_{s∈W} I_j(s)) / (R_PRIOR_RATE + Σ_{s∈W} Λ_j(s)),
     with Λ_j(s) = Σ_{a=1}^{max_s-1} p(a) I_j(s-a)  [total infectiousness at day s].
     gen_time is 0-indexed and lag a is weighted by gen_time[a] = p(a), matching the
     forward simulator's force of infection (E_pde[:,:,1:] @ infect_profile[1:]).
+
+    Estimates begin at t = window, so the first reported window is [1, window] and
+    day 0's incidence enters only through Λ.  The window ending at t = window - 1 is
+    already complete ([0, window-1]) and is skipped by this convention; it makes no
+    difference to any reported number, because the scored day sets start far later
+    (day 16 at the earliest in any scenario the manuscript uses).
 
     R̂ is returned only where the window holds at least R_MIN_WINDOW_CASES = 1 case,
     the smallest observable count (see mobility_rt.config for why one and not more).
@@ -61,7 +67,7 @@ def estimate_R_independent(incidence, gen_time, window=WINDOW):
 def compute_naive_R_aggregate(incidence_total, gen_time_pmf, window=WINDOW):
     """Sliding-window independent estimator applied to aggregate (network-total) incidence.
 
-    Treats the entire network as one homogeneous location, using the same Cori/EpiEstim
+    Treats the entire network as one homogeneous location, using the same Gamma(1, 1)
     prior, window and observability floor as estimate_R_independent:
       R̂(t) = (R_PRIOR_SHAPE + Σ_{s∈W} I(s)) / (R_PRIOR_RATE + Σ_{s∈W} Λ(s))
     where W = [t-window+1, t] and Λ(s) = Σ_{a=1}^{max_s-1} p(a) I(s-a).
@@ -104,10 +110,19 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
       pw  resident population, w_j ∝ N_j
       Lw  total infectiousness, w_j ∝ Λ_j (ref [68]).  An independent estimate
           summarises its window [t-6, t], so its weight is Λ_j summed over that same
-          window; R^j_out(t) is instantaneous, so its weight is Λ_j(t).  Because
-          R̂^j_ind is the ratio of windowed incidence to windowed Λ_j, the
-          Λ-weighted mean of R̂^j_ind is the network-total incidence over the network
-          total Λ apart from the prior, i.e. close to agg by construction.
+          window; R^j_out(t) is instantaneous, so its weight is Λ_j(t).
+
+          READ THIS BEFORE INTERPRETING ind_Lw AGAINST agg.  Without the prior the
+          two are not merely close, they are the SAME NUMBER: with R̂_j = I_j/Λ_j
+          (windowed sums), Σ_j Λ_j R̂_j / Σ_j Λ_j = Σ_j I_j / Σ_j Λ_j, which is the
+          aggregate estimator.  Verified numerically to 2e-16 on every scored day of
+          every scenario.  The entire published difference between the ind_Lw and agg
+          rows is therefore prior bookkeeping: ind_* adds one pseudo-case to EACH of
+          the N locations before averaging, agg adds one to the network total, so
+          ind_Lw carries N times the prior mass.  On the growth phase that accounts
+          for 52% (Scenario A) and 69% (Scenario C) of ind_Lw's reported error.  A
+          reader who takes ind_Lw > agg as evidence about spatial aggregation is
+          being misled; the difference is the prior, and nothing else.
       Rw  relative transmissibility, w_j ∝ the estimate itself, giving
           Σ_j R_j² / Σ_j R_j; for R_out this is E(t) (Eq 42)
     """
@@ -168,7 +183,10 @@ def _compute_naive_suite(sim, city, gen_time_pmf):
 
     # ── R_out from the model, aggregated ─────────────────────────────────
     out_Lw = np.full(T_len, np.nan)
-    out_pw = np.zeros(T_len)
+    # NaN, not zeros: every series here must start undefined, so that a day the loop
+    # below ever fails to fill is dropped by the isfinite mask rather than entering
+    # the tables as a genuine 0.0.
+    out_pw = np.full(T_len, np.nan)
     for t in range(T_len):
         if lam[t].sum() > 1e-6:
             out_Lw[t] = float(np.sum(lam[t] * R_out_t[t]) / lam[t].sum())

@@ -33,6 +33,8 @@ mobility_rt/
     simulation.py         renewal-PDE forward simulation, phase days
     estimators.py         independent (Cori) estimators and network aggregations
     error_tables.py       Tables SI1-SI2
+    location_errors.py    per-location discrepancy and diagnostics of the independent estimates
+    combined_table.py     Table SI3 (network- and location-level halves on one day set)
     heterogeneity.py      contact and infectiousness multipliers of the -het scenarios
     plotting/             figure code (imports matplotlib)
     scripts/run_all.py    builds every scenario and writes every manuscript figure and table
@@ -104,7 +106,7 @@ pmf and truncated at 25 d. Transmission uses infection ages a_E ≥ 1 only.
   the end of day t.
 - A sliding-window estimate at day t summarises days t−6 … t.
 
-## Estimator comparisons (Fig 4, Figs SI10–SI25, Tables SI1–SI2)
+## Estimator comparisons (Fig 4, Figs SI10–SI25, Tables SI1–SI3)
 
 Nine network-level summaries are compared with ρ(R(t)) (and E(t)): the aggregate-incidence
 estimate, and the arithmetic-mean, population-weighted, infectiousness-weighted and
@@ -145,8 +147,24 @@ The statistics printed on the bias figures equal the corresponding table cells (
 | SI32 | `main/fig_scenario_C_transience.pdf` | `figures_main.plot_fig_C_transience` |
 | SI33 | `main/fig_lehmer_mean_spectrum_Scenario_C.pdf` | `figures_main.plot_lehmer_mean_spectrum` |
 | Tables SI1–SI2 | `tables/estimator_error_{full,growth}.{csv,tex}` | `error_tables.build_estimator_error_tables` |
+| Table SI3 | `tables/manuscript_table.{csv,tex}` | `combined_table.build_combined_table` (from `location_errors.build_location_table` and `build_diagnostics_table`, which also write `tables/location_{discrepancy,diagnostics}.{csv,tex}`) |
 
 Fig 1 is a schematic and is not produced by the code.
+
+Every alternative scenario gets the identical Fig 2 / Fig 3 / Fig 5 panel set, drawn
+from its own simulation, its own mobility series, its own independent R̂ and its own
+generation-time snapshots, so any two of them differ only in the scenario. Each
+prefix below is written with the five suffixes `_02_overview.pdf`,
+`_02_overview_surface.pdf`, `_03_taxonomy.pdf`, `_03_taxonomy_surface.pdf` and
+`_04_spectral.pdf` in `out_figs/corrected/`:
+
+| Prefix | Scenario |
+|---|---|
+| `fig` | Dense urban (A) — the manuscript's Figs 2, 3, 5 |
+| `fig_SI_static` | A with static mobility — Figs SI7–SI9 |
+| `fig_A_het` | Dense urban with heterogeneous contact rate and infectiousness |
+| `fig_B`, `fig_B_het` | Sparse national, baseline and heterogeneous |
+| `fig_C`, `fig_C_het` | Hub-amplified, baseline and heterogeneous |
 
 ## Tests
 

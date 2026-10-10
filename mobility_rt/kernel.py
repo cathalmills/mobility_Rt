@@ -24,8 +24,14 @@ def _as_multiplier(mult, n, name):
 
 
 def _kernel_base(f_t, populations, lw, lb, contact_mult=None):
-    """
-    Precompute base_K[k,j] and its within/between split for one time-slice.
+    """Precompute base_K[k,j] and its within/between split for ONE time-slice.
+
+    Inputs:
+      f_t          mobility for this day, f_t[j, l] = share of j's residents at l
+      populations  resident population of each location
+      lw           base contact rate (POLYMOD)
+      lb           lw x the away-from-home multiplier (lower transmission away
+                   from the home location)
 
     Two-component decomposition (c[l] = contact_mult at MEETING location l):
       bK_within[k,j] = lw * c[k] * f[j,k] * f[k,k] / N_eff[k]
@@ -44,12 +50,15 @@ def _kernel_base(f_t, populations, lw, lb, contact_mult=None):
 
     Returns: base_K, bK_within, bK_between, N_eff, inv_Neff
     """
+
+    # validate the multiplier (None -> ones)
     c        = _as_multiplier(contact_mult, f_t.shape[0], "contact_mult")
+    # effective population present at each meeting location l on this day
     N_eff    = f_t.T @ populations
     inv_Neff = np.where(N_eff > 0, 1.0 / N_eff, 0.0)
     c_inv    = c * inv_Neff                          # c[l]/N_eff[l]
     A        = f_t * c_inv[np.newaxis, :]            # A[j,l] = c[l]*f[j,l]/N_eff[l]
-    D        = A @ f_t.T                             # D[j,k] = Σ_l A[j,l]*f[k,l]
+    D        = A @ f_t.T                             # D[j,k] = Σ_l A[j,l]*f[k,l] at time t
     within   = f_t.T * (f_t.diagonal() * c_inv)[:, np.newaxis]  # [k,j], meeting at k
     bK_within  = lw * within
     bK_between = lb * np.maximum(D.T - within, 0.0)  # away-meeting component ≥ 0
@@ -61,17 +70,28 @@ def compute_R_matrix(f_t, S, populations, prob_peak, infect_profile, lw, lb,
                      contact_mult=None, infect_mult=None):
     """R_{kj}(t) = m[k] * prob_peak * Σ_{a≥1} p(a) * S[j] * base_K[k,j].
 
+    ORIENTATION (deliberate, and the transpose of the manuscript's NGM).  Row k is
+    the INFECTOR's home location, column j the INFECTEE's, so R[k, j] is transmission
+    from residents of k to residents of j.  The manuscript's next-generation matrix
+    K^D is the transpose of this, K^D[j, k] = R[k, j]: that is why the forward step
+    is R.T @ Λ, why spectral_analysis's "right_eigvec" (of R) is the manuscript's
+    reproductive value and its "left_eigvec" the stable distribution, and why
+    ρ is unchanged (a matrix and its transpose share a spectrum).
+
     The integral over infection age uses ages a ≥ 1 (infect_profile[1:]), matching
     the forward simulator's force of infection (E_pde[:,:,1:] @ infect_profile[1:]),
     which excludes same-day (a=0) transmission.  Using the full Σ_{a≥0} p(a) would
-    overstate R by 1/(1-p[0]) and make the realised R0 = R0_target·(1-p[0]); for the
-    Hart GT p[0]≈4e-6 (negligible) but this keeps the NGM exactly consistent with the
-    dynamics for any (e.g. short) generation time.
+    overstate R by 1/(1-p[0]); for the Hart generation time p[0] ≈ 4e-6, negligible,
+    but the a ≥ 1 convention keeps the NGM exactly consistent with the dynamics for
+    any (e.g. short) generation time.
 
-    contact_mult c[l] scales the contact rate at MEETING location l (see _kernel_base).
+    contact_mult c[l] scales the contact rate at MEETING location l (see _kernel_base).    
     infect_mult  m[k] scales the transmission probability of an infector resident in k,
-    so it multiplies row k, i.e. everyone that infector k infects.  Both default to
-    None (≡ 1) and then reproduce the homogeneous R matrix exactly.
+    so it multiplies row k, i.e. everyone that infector k infects. 
+    I've included to allow for spatially heterogeneous contact rates in different locations and 
+        spatially heterogenous transmission probabilities from residents of different locations.
+    However, I/you can change components of R_{kj} in so many more ways, and likely more interesting ways!
+    Both default to None (≡ 1)
     """
     base_K, _, _, _, _ = _kernel_base(f_t, populations, lw, lb, contact_mult)
     m = _as_multiplier(infect_mult, f_t.shape[0], "infect_mult")
@@ -80,7 +100,7 @@ def compute_R_matrix(f_t, S, populations, prob_peak, infect_profile, lw, lb,
 
 
 def R_outward(R_mat):
-    return R_mat.sum(axis=1)
+    return R_mat.sum(axis=1) #sum over cols 
 
 
 def R_inward(R_mat):
@@ -89,7 +109,7 @@ def R_inward(R_mat):
 
 def R_system(R_mat):
     ev = np.linalg.eigvals(R_mat)
-    return float(np.max(np.abs(ev)))
+    return float(np.max(np.abs(ev))) #spectral radius (same for transpose)
 
 
 def compute_R_meeting(f_t, S, populations, prob_peak, infect_profile, lw, lb,

@@ -1,4 +1,5 @@
-"""mobility_rt.plotting.figures_main — manuscript Fig 4 and Figs SI10-SI25, SI28-SI33."""
+"""mobility_rt.plotting.figures_main — manuscript Fig 4, the per-scheme SI figure set
+(one figure per aggregation scheme) and Figs SI28-SI33."""
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -17,7 +18,7 @@ from mobility_rt.type_reproduction import (_group_indices, type_reproduction_num
                                            type_reproduction_numbers)
 
 # Non-breaking hyphen for tick labels.  Held in a constant because a backslash escape
-# inside an f-string expression is a SyntaxError before Python 3.12 (F17).
+# inside an f-string expression is a SyntaxError before Python 3.12.
 NB_HYPHEN = "\u2011"
 
 
@@ -131,7 +132,7 @@ def plot_fig5(sim_A, sim_B, f_B, save_prefix="fig"):
     print(f"  Saved {save_prefix}_05_comparison.pdf")
 
 
-# ── Spatial-aggregation-bias figures: Fig 4 and Figs SI10-SI25 ────────────
+# ── Spatial-aggregation-bias figures: Fig 4 and the per-scheme SI set ─────
 
 DEFAULT_BIAS_ROW_LABELS = ("Dense urban (Scenario A)",
                            "Sparse national (Scenario B)",
@@ -174,22 +175,29 @@ def _scheme(est_key):
                    f"smoothing is unknown and it cannot be scored")
 
 
-def _plot_main_bias_3x3(all_data, est_key, fname, target="rho_t"):
-    """One 3-row × 3-column spatial-aggregation-bias figure (Fig 4, Figs SI10-SI25).
+def _plot_main_bias_grid(all_data, est_key, fname, target="rho_t",
+                        show_benchmark=True):
+    """One 3-row spatial-aggregation-bias figure (Fig 4 and the per-scheme SI set).
 
     all_data : [(suite, row_label), ...] for Scenarios A, B, C (_compute_main_bias_data)
     est_key  : the aggregation scheme shown, a key of error_tables.SCHEMES
     fname    : output path (.pdf)
     target   : "rho_t" scores the scheme against ℛ(t) = ρ(R(t)); "E_t" against E(t)
+    show_benchmark : draw the third column.  The statistics it summarises are
+         returned either way, so suppressing it changes the layout only.  Fig 4 and
+         its heterogeneous twin keep it (main-text layout, panels A-I); the
+         scheme-by-scheme sets drop it, because with one figure per scheme the
+         out_Rw figure IS E(t) against ℛ(t) and repeating it in every other figure
+         adds nothing.
 
     Columns, one row per scenario:
       0  the target (solid), the other network quantity (dotted), the scheme
          (dashed) and, for a sliding-window scheme, the target's trailing mean
       1  the scheme minus its matched reference
       2  E(t) − ℛ(t), the same in every figure, so every scheme is read against
-         one benchmark
+         one benchmark (only when show_benchmark)
 
-    Matched reference (D8).  A sliding-window (Cori/EpiEstim) scheme summarises the
+    Matched reference.  A sliding-window (Cori/EpiEstim) scheme summarises the
     ESTIMATOR_WINDOW days ending at t, so it is compared with the target's trailing
     mean over those days; a scheme without a window is compared with the target on
     day t.  Whether a scheme is windowed comes from error_tables.SCHEMES.
@@ -203,17 +211,17 @@ def _plot_main_bias_3x3(all_data, est_key, fname, target="rho_t"):
     Statistics box, per period: MRE = mean |difference| / reference and bias = mean
     difference / reference, in per cent, with the number of days.  "threshold" is
     the settled crossing of 1 by the scheme minus that of the target on day t, both
-    counted on the scored days (D10), so it includes any delay due to the window.
+    counted on the scored days, so it includes any delay due to the window.
 
     Returns {row_label: {"n_days": {...}, "scheme": {...}, "E": {...}}}, where
     "scheme" and "E" hold (MRE, bias) for "growth" and "decline" and the
     "threshold_days" lag (None if either series never settles below 1).
 
-    Panel labels A–I, row-major.
+    Panel labels A–I (A–F without the benchmark column), row-major.
     """
     if len(all_data) != 3:
         raise ValueError(
-            f"_plot_main_bias_3x3 expects exactly 3 scenario rows, got {len(all_data)}")
+            f"_plot_main_bias_grid expects exactly 3 scenario rows, got {len(all_data)}")
     sch = _scheme(est_key)
     if target not in _TARGETS:
         raise KeyError(f"unknown target {target!r}; use one of {sorted(_TARGETS)}")
@@ -259,9 +267,18 @@ def _plot_main_bias_3x3(all_data, est_key, fname, target="rho_t"):
             return "n/a"
         return f"${v:+.1f}$%" if signed else f"${v:.1f}$%"
 
-    fig = plt.figure(figsize=(7.2, 7.8))
-    gs  = gridspec.GridSpec(3, 3, hspace=0.95, wspace=0.52,
-                            left=0.11, right=0.97, top=0.95, bottom=0.06)
+    # Panel geometry is pinned in INCHES, so a panel is exactly the same size with
+    # and without the benchmark column: only the figure width changes.  The
+    # three-column case reproduces the original 7.2 in figure and its 0.11/0.97
+    # margins exactly, so the SI figures are unchanged by the two-column option.
+    FIG_W_3COL, MARGIN_L, MARGIN_R, WSPACE = 7.2, 0.792, 0.216, 0.52
+    n_cols  = 3 if show_benchmark else 2
+    panel_w = (FIG_W_3COL - MARGIN_L - MARGIN_R) / (3 + 2 * WSPACE)
+    fig_w   = MARGIN_L + panel_w * (n_cols + (n_cols - 1) * WSPACE) + MARGIN_R
+    fig = plt.figure(figsize=(fig_w, 7.8))
+    gs  = gridspec.GridSpec(3, n_cols, hspace=0.95, wspace=WSPACE,
+                            left=MARGIN_L / fig_w, right=1.0 - MARGIN_R / fig_w,
+                            top=0.95, bottom=0.06)
 
     stats = {}
     panel_idx = 0
@@ -373,11 +390,12 @@ def _plot_main_bias_3x3(all_data, est_key, fname, target="rho_t"):
         _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
 
         # ── Col 2: E(t) against ℛ(t) ────────────────────────────────────────
-        ax = fig.add_subplot(gs[row, 2])
-        _bias_panel(ax, diff_E, row_stats["E"],
-                    r"$\mathcal{E}(t) - \mathcal{R}(t)$",
-                    r"Bias — $\mathcal{E}(t)$ vs $\mathcal{R}(t)$")
-        _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
+        if show_benchmark:
+            ax = fig.add_subplot(gs[row, 2])
+            _bias_panel(ax, diff_E, row_stats["E"],
+                        r"$\mathcal{E}(t) - \mathcal{R}(t)$",
+                        r"Bias — $\mathcal{E}(t)$ vs $\mathcal{R}(t)$")
+            _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
 
     plt.savefig(fname, dpi=300, bbox_inches="tight")
     plt.close()
@@ -385,43 +403,92 @@ def _plot_main_bias_3x3(all_data, est_key, fname, target="rho_t"):
     return stats
 
 
+HET_BIAS_ROW_LABELS = ("Dense urban, heterogeneous (Scenario A-het)",
+                       "Sparse national, heterogeneous (Scenario B-het)",
+                       "Hub-amplified, heterogeneous (Scenario C-het)")
+
+
 def plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C,
                           gen_time_pmf, save_prefix="fig", all_data=None,
-                          labels=None):
+                          labels=None, fname_suffix="main_bias_combined"):
     """Fig 4: bias of the relative-transmissibility-weighted independent estimates
     R^{ind,Rw}(t) = Σ_j (R̂^j_ind)² / Σ_j R̂^j_ind (§3.2.2, ref [68]) and of E(t)
     (Eq 42), both against ℛ(t), for Scenarios A, B and C.
 
-    Layout and statistics are documented on _plot_main_bias_3x3.  Pass a precomputed
+    Layout and statistics are documented on _plot_main_bias_grid.  Pass a precomputed
     all_data (from _compute_main_bias_data) to reuse the estimator suites; `labels`
     is then ignored, because all_data carries its own row labels.
 
-    Saved as {save_prefix}_main_bias_combined.pdf.  Returns all_data.
+    THREE columns, panels A-I: the trajectories, the scheme against its matched
+    reference, and the E(t) benchmark.  This is the MAIN-TEXT layout and it keeps
+    the benchmark column deliberately, so that Fig 4 shows R^{ind,Rw}(t) and E(t)
+    against ℛ(t) side by side.  The per-scheme sets that support it
+    (plot_main_bias_suite and plot_estimator_si_suite) drop that column instead,
+    because it is identical in every figure of a set and because those sets already
+    give E(t) its own figure as the out_Rw scheme.
+
+    Saved as {save_prefix}_{fname_suffix}.pdf.  The heterogeneous twin is the same
+    figure over the -het simulations, so it is produced by this same entry point
+    with fname_suffix="het_main_bias_combined" and HET_BIAS_ROW_LABELS; keeping one
+    plotting path means the two figures cannot drift apart.  Returns all_data.
     """
     if all_data is None:
         all_data = _compute_main_bias_data(sim_A, sim_B, sim_C,
                                            city_A, city_B, city_C, gen_time_pmf,
                                            labels=labels)
-    _plot_main_bias_3x3(all_data, "ind_Rw", f"{save_prefix}_main_bias_combined.pdf",
-                        target="rho_t")
+    _plot_main_bias_grid(all_data, "ind_Rw", f"{save_prefix}_{fname_suffix}.pdf",
+                        target="rho_t", show_benchmark=True)
     return all_data
 
 
-def plot_estimator_si_suite(all_data, save_prefix="fig"):
-    """Figs SI10-SI25: every aggregation scheme in error_tables.SCHEMES scored against
-    ℛ(t) and against E(t), in the layout of Fig 4.
+def plot_main_bias_suite(all_data, save_prefix="fig",
+                         fname_suffix="main_bias_combined"):
+    """The Fig 4 layout for EVERY aggregation scheme, scored against ℛ(t).
 
-    Writes {save_prefix}_naive_{scheme}_vs_{Rt|Et}.pdf.  out_Rw is E(t) itself, so
-    its "vs E(t)" figure would be identically zero and is not drawn (F25).
-    Returns {path: statistics returned by _plot_main_bias_3x3}.
+    all_data : [(suite, row_label), ...] from _compute_main_bias_data, reused across
+               all schemes so the nine figures share one set of simulations.
+
+    The scheme list is error_tables.SCHEMES itself rather than a hand-kept copy, so
+    a scheme cannot be added to the tables and quietly missed here.  That includes
+    out_Rw, which IS E(t): with one figure per scheme, E(t) against ℛ(t) is that
+    figure, which is why no figure carries an E(t) benchmark column.
+
+    Writes {save_prefix}_{fname_suffix}_{scheme}.pdf.  Returns {path: statistics}.
     """
     written = {}
     for sch in SCHEMES:
-        for target, (_, tag) in _TARGETS.items():
-            if sch.key == "out_Rw" and target == "E_t":
-                continue
-            fname = f"{save_prefix}_naive_{sch.key}_vs_{tag}.pdf"
-            written[fname] = _plot_main_bias_3x3(all_data, sch.key, fname, target=target)
+        fname = f"{save_prefix}_{fname_suffix}_{sch.key}.pdf"
+        written[fname] = _plot_main_bias_grid(all_data, sch.key, fname,
+                                             target="rho_t", show_benchmark=False)
+    return written
+
+
+def plot_estimator_si_suite(all_data, save_prefix="fig"):
+    """Every aggregation scheme in error_tables.SCHEMES scored against ℛ(t), in the
+    layout of Fig 4: one figure per scheme, two columns each.
+
+    NO E(t) BENCHMARK COLUMN.  It was the same three panels in every figure of the
+    set, and E(t) against ℛ(t) is already the out_Rw figure of this same set.
+
+    SCORED AGAINST ℛ(t) ONLY.  ℛ(t) is the quantity with the threshold property;
+    E(t) explicitly does not have one (§3.1.5).  Scoring the same schemes against
+    E(t) as well adds little: retargeting moves every scheme in a scenario by
+    roughly the same amount, about -(E(t) - ℛ(t))/ℛ(t), which over the growth phase
+    averages -3.4%, -0.1% and +0.9% in Scenarios A, B and C.  It is NOT a single
+    constant — the daily gap varies about that mean (sd 0.7, 1.3 and 0.3 points
+    respectively), and the target enters each day's denominator — so rankings are
+    preserved in practice here rather than by construction.  The gap itself is what
+    the out_Rw figure of this set reports.
+
+    Writes {save_prefix}_naive_{scheme}_vs_Rt.pdf, one per scheme.
+    Returns {path: statistics returned by _plot_main_bias_grid}.
+    """
+    tag = _TARGETS["rho_t"][1]
+    written = {}
+    for sch in SCHEMES:
+        fname = f"{save_prefix}_naive_{sch.key}_vs_{tag}.pdf"
+        written[fname] = _plot_main_bias_grid(all_data, sch.key, fname,
+                                              target="rho_t", show_benchmark=False)
     return written
 
 

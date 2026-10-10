@@ -3,6 +3,8 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 
+
+#For manuscript, I've created Lagos-like + Zambia-like human movement scenarios
 def generate_city(n_locations=10, scenario="lagos", seed=42):
     """
     Generate synthetic city with empirically-grounded structure.
@@ -29,12 +31,12 @@ def generate_city(n_locations=10, scenario="lagos", seed=42):
                     ["dense"]    * max(1, int(0.30 * N)) +
                     ["suburban"] * max(1, int(0.30 * N)) +
                     ["peripheral"] * max(1, N - int(0.20*N) - int(0.30*N) - int(0.30*N)))
-        type_seq = type_seq[:N]
+        type_seq = type_seq[:N] 
         rng.shuffle(type_seq)
         node_types = type_seq
 
         # Spatial: tight urban spread, ~40 km radius
-        radii  = rng.exponential(8.0, N)
+        radii  = rng.exponential(8.0, N) 
         angles = rng.uniform(0, 2*np.pi, N)
         coords = np.column_stack([radii * np.cos(angles),
                                   radii * np.sin(angles)])

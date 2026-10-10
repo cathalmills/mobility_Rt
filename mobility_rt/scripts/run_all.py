@@ -12,23 +12,32 @@ if __package__ in (None, ""):
         sys.path.insert(0, _root)
 
 import numpy as np
+from mobility_rt.combined_table import build_combined_table
 from mobility_rt.config import BETWEEN_FRACTION, COVID_PARAMS, DAY_VARIATION_SD
 from mobility_rt.distributions import discretise_gamma
-from mobility_rt.error_tables import build_estimator_error_tables
+from mobility_rt.error_tables import TABLE_PERIODS, build_estimator_error_tables
 from mobility_rt.estimators import WINDOW, estimate_R_independent
 from mobility_rt.generation_time import compute_generation_times
 from mobility_rt.geometry import generate_city
 from mobility_rt.heterogeneity import contact_multipliers, infectiousness_multipliers
+from mobility_rt.location_errors import build_diagnostics_table, build_location_table
 from mobility_rt.mobility import generate_mobility
 from mobility_rt.plotting.figures_corrected import run_corrected_figures
-from mobility_rt.plotting.figures_main import (_compute_main_bias_data, plot_estimator_si_suite,
+from mobility_rt.plotting.figures_main import (HET_BIAS_ROW_LABELS,
+                                               _compute_main_bias_data,
+                                               plot_estimator_si_suite,
                                                plot_fig5, plot_fig_C_transience,
                                                plot_lehmer_mean_spectrum,
-                                               plot_main_bias_figure, plot_type_repro)
+                                               plot_main_bias_figure,
+                                               plot_main_bias_suite, plot_type_repro)
 from mobility_rt.plotting.figures_si import (plot_SI0_population, plot_SI1,
                                              plot_SI5_combined, plot_SI_3d_earlypeak,
                                              plot_SI_R_comparison, plot_SI_epi_params,
                                              plot_SI_pde_convergence, plot_SI_sensitivity)
+from mobility_rt.plotting.figures_tables import (plot_estimator_error_figure,
+                                                 plot_location_diagnostics_figure,
+                                                 plot_location_discrepancy_figure,
+                                                 plot_manuscript_figure)
 from mobility_rt.plotting.style import _set_pub_style
 from mobility_rt.simulation import phase_days, simulate_epidemic_pde
 
@@ -91,7 +100,7 @@ def build_scenarios():
     infect_profile = gen_time_pmf.copy()
 
     def _simulate(pops, f_series, base_f, initial, contact_mult=None, infect_mult=None):
-        # Calibration (D5): λ_W and λ_B are scaled so that ρ(R) = R0_target for a fully
+        # Calibration: λ_W and λ_B are scaled so that ρ(R) = R0_target for a fully
         # susceptible population under the scenario's noise-free weekday mobility
         # base_f, the same matrix for a scenario and its -het and -static variants.
         return simulate_epidemic_pde(
@@ -130,7 +139,7 @@ def build_scenarios():
     # 200k satellites) and in hub_attraction_power = 8, which concentrates satellite
     # commuting on the hub.  Geometry, commuting fractions, the mobility noise seed
     # and the seeding (10 infections at L1) are A's, so any difference between A and
-    # C is due to the hub (decision D16).  Node types follow the populations: the hub
+    # C is due to the hub.  Node types follow the populations: the hub
     # is "core" and each 200k satellite "peripheral" (the Lagos type whose base
     # population is 200k).  Types feed only C-het's contact multipliers and labels.
     pops_C = np.full(N_LOC, 200_000.0)
@@ -186,7 +195,7 @@ def main():
     LW, LB = sc["LW"], sc["LB"]
     gen_time_pmf = sc["gen_time_pmf"]
     city_A, city_B, city_C = sc["city_A"], sc["city_B"], sc["city_C"]
-    pops_A = city_A[1]
+    pops_A, pops_B, pops_C = city_A[1], city_B[1], city_C[1]
     f_A, f_A_static, f_B, f_C = sc["f_A"], sc["f_A_static"], sc["f_B"], sc["f_C"]
     sim_A, sim_A_static, sim_A_het = sc["sim_A"], sc["sim_A_static"], sc["sim_A_het"]
     sim_B, sim_B_het = sc["sim_B"], sc["sim_B_het"]
@@ -224,12 +233,29 @@ def main():
                         LW, LB, T_test=T, save_prefix=spfx)                # Fig SI6
     plot_SI_3d_earlypeak(sim_A, sim_B, spfx)                               # Fig SI1
 
-    print("\n─── Spatial aggregation bias: Fig 4 and Figs SI10-SI25 ───")
+    print("\n─── Spatial aggregation bias: Fig 4 and the per-scheme SI set ───")
     bias_data = _compute_main_bias_data(sim_A, sim_B, sim_C, city_A, city_B, city_C,
                                         gen_time_pmf)
     plot_main_bias_figure(sim_A, sim_B, sim_C, city_A, city_B, city_C, gen_time_pmf,
                           save_prefix=mpfx, all_data=bias_data)            # Fig 4
-    plot_estimator_si_suite(bias_data, save_prefix=mpfx)                  # Figs SI10-SI25
+    plot_estimator_si_suite(bias_data, save_prefix=mpfx)          # per-scheme SI set
+
+    # The heterogeneous twin of Fig 4, through the same plotting path so the two
+    # cannot diverge: same scheme, same target, same layout, the -het simulations.
+    het_bias_data = _compute_main_bias_data(sim_A_het, sim_B_het, sim_C_het,
+                                            city_A, city_B, city_C, gen_time_pmf,
+                                            labels=HET_BIAS_ROW_LABELS)
+    plot_main_bias_figure(sim_A_het, sim_B_het, sim_C_het, city_A, city_B, city_C,
+                          gen_time_pmf, save_prefix=mpfx, all_data=het_bias_data,
+                          fname_suffix="het_main_bias_combined")
+
+    # One figure per aggregation scheme for the -het family, in the Fig 4 layout.
+    # The homogeneous family's per-scheme set is plot_estimator_si_suite above:
+    # calling plot_main_bias_suite for it as well produced the same nine figures a
+    # second time under fig_main_bias_combined_{scheme}.pdf, which only invited a
+    # reader to hunt for a difference between two names for one figure.
+    plot_main_bias_suite(het_bias_data, save_prefix=mpfx,
+                         fname_suffix="het_main_bias_combined")
 
     print("\n─── Estimator mean-relative-error tables (Tables SI1-SI2) ───")
     scenarios = [("Scenario A", sim_A, city_A),
@@ -238,8 +264,35 @@ def main():
                  ("Scenario B-het", sim_B_het, city_B),
                  ("Scenario C", sim_C, city_C),
                  ("Scenario C-het", sim_C_het, city_C)]
-    build_estimator_error_tables(scenarios, gen_time_pmf, out_dir="out_figs/tables",
-                                 prefix="estimator_error")
+    err_table, _ = build_estimator_error_tables(scenarios, gen_time_pmf,
+                                                out_dir="out_figs/tables",
+                                                prefix="estimator_error")
+
+    # Table SI3: the location-level half is computed on the same growth-phase days as
+    # the network-level half, and build_combined_table refuses to write the table if
+    # the day counts differ.  The two location tables are also written on their own.
+    print("\n─── Per-location tables and Table SI3 ───")
+    loc_table, _ = build_location_table(scenarios, gen_time_pmf,
+                                        out_dir="out_figs/tables",
+                                        prefix="location_discrepancy")
+    diag_table, _ = build_diagnostics_table(scenarios, gen_time_pmf,
+                                            out_dir="out_figs/tables",
+                                            prefix="location_diagnostics")
+    comb_table, _ = build_combined_table(scenarios, gen_time_pmf,
+                                         out_dir="out_figs/tables",
+                                         prefix="manuscript_table",
+                                         net_table=err_table,
+                                         loc_table=loc_table,
+                                         diag_table=diag_table)
+
+    # The same three tables, drawn.  These read the dicts just built rather than
+    # recomputing anything, so a figure cannot disagree with its table.
+    print("\n\u2500\u2500\u2500 Table figures \u2500\u2500\u2500")
+    for period in TABLE_PERIODS:
+        plot_estimator_error_figure(err_table, period, save_prefix=mpfx)
+    plot_location_discrepancy_figure(loc_table, save_prefix=mpfx)
+    plot_location_diagnostics_figure(diag_table, save_prefix=mpfx)
+    plot_manuscript_figure(comb_table, save_prefix=mpfx)
 
     plot_SI0_population(city_A, city_B, spfx)                              # Fig SI3
     plot_SI_R_comparison(sim_A, city_A, R_ind_A, spfx)                     # Fig SI26
@@ -248,11 +301,41 @@ def main():
     plot_type_repro(sim_A, sim_B, city_A, city_B, mpfx)
 
     print("\n─── Figures 2, 3, 5 and their static-mobility twins (Figs SI7-SI9) ───")
+    # Every alternative scenario gets exactly the treatment the static-mobility twin
+    # gets: the same fig_02 / fig_03 / fig_04 panel set, drawn from its own
+    # simulation, its own mobility series, its own independent R̂ and its own GT
+    # snapshots.  Each heterogeneous run is listed next to the baseline it is the
+    # counterpart of, so a reader comparing A with A-het, B with B-het or C with
+    # C-het is comparing two figures that differ in nothing but the multipliers.
+    # (Scenario A's own baseline set is the "fig_*" one drawn by the call below.)
+    # -het shares its baseline's mobility series and city, and differs only in the
+    # multipliers, which _gt_snapshots picks up from the simulation itself.
+    _corrected_extras = [
+        (sim_A_het, city_A, f_A, pops_A, "Dense urban (A-het)",     "fig_A_het"),
+        (sim_B,     city_B, f_B, pops_B, "Sparse national (B)",     "fig_B"),
+        (sim_B_het, city_B, f_B, pops_B, "Sparse national (B-het)", "fig_B_het"),
+        (sim_C,     city_C, f_C, pops_C, "Hub-amplified (C)",       "fig_C"),
+        (sim_C_het, city_C, f_C, pops_C, "Hub-amplified (C-het)",   "fig_C_het"),
+    ]
+    extra_scenarios = []
+    for _sim_x, _city_x, _f_x, _pops_x, _name_x, _pfx_x in _corrected_extras:
+        extra_scenarios.append({
+            "sim":       _sim_x,
+            "city_data": _city_x,
+            "f_series":  _f_x,
+            "R_ind":     estimate_R_independent(_sim_x["incidence"], gen_time_pmf,
+                                                window=WINDOW),
+            "gt_snaps":  _gt_snapshots(_sim_x, _f_x, _pops_x, params, gen_time_pmf,
+                                       max_days),
+            "name":      _name_x,
+            "prefix":    _pfx_x,
+        })
     run_corrected_figures(sim_A, sim_A_static, city_A, f_A, f_A_static,
                           R_ind_A, R_ind_As, gt_snaps_A, gt_snaps_As,
                           gen_time_pmf, max_days,
                           scenario_name="Dense urban",
-                          out_dir="out_figs/corrected")
+                          out_dir="out_figs/corrected",
+                          extra_scenarios=extra_scenarios)
 
     print("\n─── Lehmer-mean spectrum, Scenario C (Fig SI33) ───")
     plot_lehmer_mean_spectrum(sim_C, "Scenario_C", mpfx)

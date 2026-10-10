@@ -10,10 +10,12 @@ Brings the two halves of the analysis into one table, on one set of days:
                   It tracks growth but cannot attribute it, so it recovers the
                   network value and not the location's own transmissibility.
 
-Nothing is recomputed here.  Every figure is lifted from error_tables and
-location_errors, which each verify their own arithmetic, and the builder asserts
-that the two halves used the same days before it will emit anything.  That shared
-day set is what makes it legitimate to read a network row against a location row.
+Every figure is lifted from error_tables and location_errors, which each verify
+their own arithmetic; the only arithmetic here is the median ACROSS LOCATIONS of the
+two discrepancy rows, which reduces a per-location array to the single number the
+table prints.  The builder compares the day masks of the two halves, not just their
+counts, and refuses to emit anything unless they are identical.  That shared day set
+is what makes it legitimate to read a network row against a location row.
 
 The table reports the GROWTH PHASE, rho(R(t)) > 1, because that is where an error
 can change a decision.  error_tables also writes a full-period version.
@@ -58,7 +60,15 @@ _LOCATION_ROWS = [
 
 
 def _check_consistent(labels, net_table, loc_table, diag_table):
-    """Refuse to build unless the three sources agree on scenarios AND days."""
+    """Refuse to build unless the three sources agree on scenarios AND days.
+
+    Day MASKS are compared where all three carry one, so that two halves which
+    happen to score the same NUMBER of different days cannot slip through: the two
+    masks are built independently (location_errors additionally requires every
+    location's own trailing-mean R_out to clear RHO_FLOOR), so equality is a real
+    check and not a tautology.  Counts are compared as a fallback, for a table dict
+    assembled by hand in a test.
+    """
     for name, tbl in (("network", net_table[PERIOD]["n_days"]),
                       ("location", {k: v["n_days"] for k, v in loc_table.items()}),
                       ("diagnostics", {k: v["n_days"] for k, v in diag_table.items()})):
@@ -75,6 +85,15 @@ def _check_consistent(labels, net_table, loc_table, diag_table):
                 f"(network {n_net}, location {n_loc}, diagnostics {n_dia}); "
                 "a combined table would invite comparisons across different "
                 "day sets")
+        present = [m for m in (net_table[PERIOD].get("days", {}).get(lab),
+                               loc_table[lab].get("days"),
+                               diag_table[lab].get("days")) if m is not None]
+        if len(present) > 1 and not all(np.array_equal(present[0], m)
+                                        for m in present[1:]):
+            raise ValueError(
+                f"{lab}: the halves scored the same NUMBER of days ({n_net}) but "
+                "not the same days; a combined table would invite comparisons "
+                "across different day sets")
 
 
 def compute_combined_table(scenarios, gen_time_pmf, net_table=None,

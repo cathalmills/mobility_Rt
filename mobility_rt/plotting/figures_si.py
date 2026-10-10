@@ -313,13 +313,18 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
 
       A  total incidence for infectiousness-profile truncations τ = 10, 15, 20, 25 d
       B  ℛ(t) for the same truncations
-      C  incidence under three update rules for S at Δt = 1 d: forward Euler (the
-         solver used everywhere), Heun and RK4.  These are different update rules at
-         the same step, not a refinement of Δt.
+      C  incidence under four update rules for S at Δt = 1 d: exponential escape
+         (the solver used everywhere), forward Euler, Heun and RK4.  These are
+         different update rules at the same step, not a refinement of Δt.  Heun and
+         RK4 approximate the same within-day depletion as exponential escape, so
+         forward Euler is the outlier
       D  closed-population balance |S_end(t) + Σ_{s<=t} I(s) − N| / N per location
       E  renewal identity I_j(t) = [R(t)ᵀ Λ(t)]_j / Σ_{a>=1} p(a), with
          Λ_k(t) = Σ_{a>=1} p(a) I_k(t−a) rebuilt from the stored incidence alone
-         (an independent path through R_matrices), relative residual per location
+         (an independent path through R_matrices), relative residual per location.
+         The identity is exact only for the forward-Euler update, whose boundary
+         condition is linear in S; under the exponential update it holds to O(φ/2),
+         so both are drawn.  It is a property of the scheme, not of the model
       F  early growth: log-linear fit to incidence against the Euler–Lotka rate at the
          mean ℛ(t) over the fitting window
 
@@ -346,11 +351,15 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
             T_test, N_LOC, pops, f_sub, params["prob_transmission_peak"], gtp, md,
             params["R0_target"], initial_infections, LW, LB, f_calibration=base_f)
 
-    # the reference run (full truncation) is the forward-Euler solver of the pipeline
+    # the reference run (full truncation) is the exponential-escape solver of the pipeline
     s_ref   = sims_md[max_days_ref]
     inc_ref = s_ref["incidence"]           # (T, N)
 
-    print("  Alternative update rules (Heun, RK4)...")
+    print("  Alternative update rules (forward Euler, Heun, RK4)...")
+    s_euler = simulate_epidemic_pde(
+        T_test, N_LOC, pops, f_sub, params["prob_transmission_peak"],
+        infect_profile, max_days_ref, params["R0_target"],
+        initial_infections, LW, LB, f_calibration=base_f, update="euler")
     s_heun = _simulate_heun(
         T_test, N_LOC, pops, f_sub, params["prob_transmission_peak"],
         infect_profile, max_days_ref, params["R0_target"],
@@ -368,9 +377,14 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
     lam_ref = total_infectiousness(inc_ref, infect_profile)   # Λ_k(t), (T, N)
     sum_p = infect_profile[1:].sum()
     renewal_resid = np.full((T_test, N_LOC), np.nan)
+    euler_resid   = np.full((T_test, N_LOC), np.nan)
+    inc_eul = s_euler["incidence"]
+    lam_eul = total_infectiousness(inc_eul, infect_profile)
     for t in range(1, T_test):
         pred = s_ref["R_matrices"][t].T @ lam_ref[t] / sum_p
         renewal_resid[t] = np.abs(inc_ref[t] - pred) / np.maximum(inc_ref[t], 1.0)
+        pred_e = s_euler["R_matrices"][t].T @ lam_eul[t] / sum_p
+        euler_resid[t] = np.abs(inc_eul[t] - pred_e) / np.maximum(inc_eul[t], 1.0)
 
     # ── figure ────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(7.2, 8.0))
@@ -405,7 +419,9 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
     # ── C: update rules ───────────────────────────────────────────────────
     ax = fig.add_subplot(gs[1, 0])
     ax.plot(inc_ref.sum(axis=1) / 1e3,
-            color=OKABE_ITO[0], lw=1.3, label="Forward Euler (used throughout)")
+            color=OKABE_ITO[0], lw=1.3, label="Exponential escape (used throughout)")
+    ax.plot(s_euler["incidence"].sum(axis=1) / 1e3,
+            color=OKABE_ITO[1], lw=1.0, ls="-.", label="Forward Euler")
     ax.plot(s_heun["incidence"].sum(axis=1) / 1e3,
             color=OKABE_ITO[4], lw=0.9, ls="--", label="Heun")
     ax.plot(s_rk4["incidence"].sum(axis=1) / 1e3,
@@ -433,12 +449,15 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
     # day 0 is the seed and has no renewal identity, so the residual starts at day 1
     resid_days = np.arange(1, T_test)
     ax.semilogy(resid_days, np.maximum(renewal_resid[1:].mean(axis=1), 1e-18),
-                color=OKABE_ITO[0], lw=1.0, label="Mean over locations")
+                color=OKABE_ITO[0], lw=1.0, label="Exponential: mean over locations")
     ax.semilogy(resid_days, np.maximum(renewal_resid[1:].max(axis=1), 1e-18),
-                color=OKABE_ITO[5], lw=0.9, ls="--", label="Max over locations")
+                color=OKABE_ITO[5], lw=0.9, ls="--", label="Exponential: max over locations")
+    ax.semilogy(resid_days, np.maximum(euler_resid[1:].max(axis=1), 1e-18),
+                color=OKABE_ITO[1], lw=0.9, ls=":",
+                label="Forward Euler: max (exact; drawn at the $10^{-18}$ floor)")
     ax.set_xlabel("Day $t$")
     ax.set_ylabel("$|I_j(t) - [\\mathbf{R}(t)^\\top\\Lambda(t)]_j/\\sum_{a\\geq1}p|$"
-                  " / max$(I_j,1)$", fontsize=6)
+                  " / max$(I_j,1)$  (floor $10^{-18}$)", fontsize=6)
     ax.set_title("(e) Renewal identity residual", fontsize=7, pad=3)
     ax.legend(fontsize=6, borderpad=0.3)
     _panel_label(ax, "E")
@@ -701,7 +720,7 @@ def plot_SI_R_comparison(sim, city_data, R_independent, save_prefix="fig"):
     """Fig SI26: independent estimates R̂^j_ind(t) against R^j_out(t) and R^j_in(t).
 
     R̂^j_ind(t) summarises the ESTIMATOR_WINDOW days ending at t, so every comparison
-    uses the matching trailing means of R^j_out and R^j_in (decision D8).  Row 1
+    uses the matching trailing means of R^j_out and R^j_in.  Row 1
     shows the three quantities themselves.
 
     3 × 3 panel layout

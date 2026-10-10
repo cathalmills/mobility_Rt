@@ -7,6 +7,12 @@ def compute_effective_populations_series(f_jk, S_start, incidence,
                                          gen_time_pmf, max_days):
     """S^l_eff(t) = Σ_j f_{jl}(t) S_j(t)  and  I^l_eff(t) = Σ_k f_{kl}(t) Λ_k(t).
 
+    Two simplifications, both deliberate: there is no same-day transmission (the
+    force of infection runs over ages a ≥ 1), and mobility is one share per day, so
+    nobody moves within a day.  Susceptible depletion WITHIN the day is not a
+    simplification any more — the default "exponential" update depletes S through
+    the day — but these series are start-of-day quantities regardless.
+
     S_start must be sim["S_start"], the START-of-day susceptibles: the S from which
     R_matrices[t] and the day-t force of infection are computed.  Λ_k(t) =
     Σ_{a=1}^{max_days-1} p(a) I_k(t-a) uses incidence up to day t-1 only, so both
@@ -25,7 +31,7 @@ def compute_effective_populations_series(f_jk, S_start, incidence,
 
 
 def phase_days(incidence, T=None):
-    """Early, peak and late days of one run, used by every snapshot figure (D11).
+    """Early, peak and late days of one run, used by the snapshot figures.
 
       peak  = day of maximum network incidence
       early = max(1, peak // 3), a third of the way to the peak; day 0 is excluded
@@ -45,10 +51,7 @@ def _calibrate(f_calibration, populations, prob_peak, infect_profile, R0_target,
                lambda_within, lambda_between, contact_mult, infect_mult):
     """One common scale on (λ_W, λ_B) giving ρ(R) = R0_target at S = N under f_calibration.
 
-    R is linear in (λ_W, λ_B) at a fixed ratio, so a single scale factor hits the
-    target exactly.  Only λ_B/λ_W (and the relative variation of the multipliers) is
-    therefore identified, not the absolute contact rates or prob_peak (F01).
-
+    R is linear in (λ_W, λ_B) at a fixed ratio
     Returns (lw, lb, rho_unscaled, scale).
     """
     f_cal = np.asarray(f_calibration, dtype=float)
@@ -69,31 +72,58 @@ def _calibrate(f_calibration, populations, prob_peak, infect_profile, R0_target,
 def simulate_epidemic_pde(T, n_locations, populations, f_jk_series, prob_peak,
                           infect_profile, max_days, R0_target, initial_infections,
                           lambda_within, lambda_between, *, f_calibration,
-                          contact_mult=None, infect_mult=None):
+                          contact_mult=None, infect_mult=None,
+                          update="exponential"):
     """
-    Deterministic first-order upwind scheme for ∂E/∂t + ∂E/∂a_E = 0 (Eq 4) on a
-    uniform grid Δt = Δa_E = 1 day, with the boundary condition (Eq 6)
+    Deterministic upwind scheme for ∂E/∂t + ∂E/∂a_E = 0 (Eq 4) on a uniform grid
+    Δt = Δa_E = 1 day.  The day-t force of infection on a susceptible resident of j
+    is the boundary condition (Eq 6),
 
-      E_j(t, 0) = S_j(t) Σ_k base_K[k, j] m_k prob_peak Σ_{a≥1} p(a) E_k(t, a),
+      φ_j(t) = Σ_k base_K[k, j] m_k prob_peak Σ_{a≥1} p(a) E_k(t, a),
 
-    capped at S_j(t), where S_j(t) is the START-of-day susceptible count and
-    base_K is the mobility kernel of _kernel_base.  The upwind shift
-    E[t, k, a] = E[t-1, k, a-1] gives E[t, k, a] = E[t-a, k, 0] exactly, so the
-    boundary condition is the discrete renewal equation.  There is no stochastic
-    noise.
+    evaluated at the day-t mobility and the START-of-day susceptibles S_j(t), with
+    base_K the mobility kernel of _kernel_base.
+    Age and time in same units, so the upwind shift
+    E[t, k, a] = E[t-1, k, a-1] gives E[t, k, a] = E[t-a, k, 0] exactly.
+
+    `update` selects how S is depleted over the day, at the same Δt = 1 day:
+      "exponential" (default)  E_j(t, 0) = S_j(t) (1 − exp(−φ_j(t))), the exact
+          solution of dS_j/dt = −S_j φ_j over the day at fixed φ: susceptibles are
+          depleted THROUGHOUT the day, as in the continuous model from which the
+          renewal equation is derived.  It never exceeds S_j(t), so no cap is needed.
+      "euler"  E_j(t, 0) = min(S_j(t) φ_j(t), S_j(t)), forward Euler: every infection
+          on day t draws on the start-of-day susceptibles.  First order in Δt.  Being
+          linear in S, it alone makes the discrete renewal identity
+          I_j(t) = [R(t)ᵀ Λ(t)]_j / Σ_{a≥1} p(a) hold exactly; under "exponential" it
+          holds to O(φ/2) (φ/2 ≤ 1.2 % at R0 = 1.5, ≤ 10.5 % at R0 = 3.0, Scenario A).
+          That identity is a property of the Euler scheme, not of the model.  Kept for
+          the SI4 comparison.
+
+    Accuracy against a refined grid (Δt = Δa_E = 1/64 d, Scenario A, T = 365 d, the
+    continuous Gamma(5.5, 1.8) profile binned at the refined step; reproduced by
+    test_refined_grid_limit).  Attack rate in percentage points of the population,
+    peak in per cent of the refined-grid peak:
+
+                        R0 = 1.5              R0 = 3.0
+                    attack pp   peak %    attack pp   peak %
+      exponential     +0.014     -0.20      -0.009     +1.45
+      euler           +0.611     +2.30      +1.147     +8.18
+
+    Both daily schemes recover the attack rate to well under a tenth of a percentage
+    point on the exponential update; forward Euler does not, and overstates the peak
+    several-fold more.  The refined grid is itself converged: m = 16 differs from
+    m = 64 by 0.011 pp (R0 = 1.5) and 0.003 pp (R0 = 3.0).
 
     Calibration: λ_W and λ_B are multiplied by one common factor so that
     ρ(R) = R0_target for a fully susceptible population (S = N) under the mobility
     matrix f_calibration (see _calibrate).
 
-    Spatial heterogeneity (both default None ≡ homogeneous):
+    Spatial heterogeneity for simulations (both default None ≡ homogeneous):
       contact_mult c[l]  contact-rate multiplier at MEETING location l
       infect_mult  m[k]  transmission-probability multiplier of an infector resident
                          in k (scales row k of R and k's force of infection)
-    Only their relative variation matters, because the calibration divides out any
-    common factor.
 
-    Closed population (D6): there are no births or deaths, so
+    Closed population: there are no births or deaths, so
     S_end[t] + Σ_{s<=t} incidence[s] = N for every t.
 
     Returned arrays, t = 0..T-1:
@@ -108,6 +138,8 @@ def simulate_epidemic_pde(T, n_locations, populations, f_jk_series, prob_peak,
       E_pde_state[t, k, a]      E_k(t, a) for ages a = 0..max_days-1
     """
     N = n_locations
+    if update not in ("exponential", "euler"):
+        raise ValueError(f"update must be 'exponential' or 'euler', got {update!r}")
     populations = np.asarray(populations, dtype=float)
     infect_mult_v = _as_multiplier(infect_mult, N, "infect_mult")
     lw, lb, rho_unscaled, scale = _calibrate(
@@ -149,12 +181,15 @@ def simulate_epidemic_pde(T, n_locations, populations, f_jk_series, prob_peak,
         base_K, _, _, _, _ = _kernel_base(f_t, populations, lw, lb, contact_mult)
         wE = infect_mult_v * prob_peak * (E_pde[t, :, 1:] @ infect_profile[1:])
         contrib_kj = base_K * wE[:, np.newaxis]  # [k,j]
-        expected_j = np.maximum(S * contrib_kj.sum(axis=0), 0.0)
-        new_j = np.minimum(expected_j, S)
+        foi_j = np.maximum(contrib_kj.sum(axis=0), 0.0)   # φ_j(t), per susceptible
+        if update == "exponential": #the default is exponential (which I recommend)
+            new_j = S * (-np.expm1(-foi_j))    # depletion throughout the day
+        else:
+            new_j = np.minimum(S * foi_j, S)   # forward Euler, capped at S
 
         # Distribute pairwise incidence proportional to contrib_kj
-        col_sum = contrib_kj.sum(axis=0)
-        for j in range(N):
+        col_sum = contrib_kj.sum(axis=0) #sum over rows
+        for j in range(N): #incidence for each location j 
             if col_sum[j] > 1e-15 and new_j[j] > 0:
                 incidence_matrix[t, :, j] = new_j[j] * contrib_kj[:, j] / col_sum[j]
 
@@ -180,9 +215,12 @@ def simulate_epidemic_pde(T, n_locations, populations, f_jk_series, prob_peak,
             "lambda_between_scaled": lb,
             "contact_mult":          contact_mult,
             "infect_mult":           infect_mult,
+            "update":                update,
             "E_pde_state":           E_pde}
 
 
+
+#Simulators for checks
 def _simulate_heun(T, n_locations, populations, f_jk_series, prob_peak,
                    infect_profile, max_days, R0_target, initial_infections,
                    lambda_within, lambda_between, *, f_calibration,

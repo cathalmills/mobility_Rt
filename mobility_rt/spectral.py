@@ -23,28 +23,33 @@ def _perron_real(evec_col):
 
 def spectral_analysis(R_mat):
     """ρ, λ₂, mixing ratio s=|λ₂|/ρ, right eigvec w, left eigvec v."""
-    ev_r, evec_r = np.linalg.eig(R_mat)
+    ev_r, evec_r = np.linalg.eig(R_mat) #right eigenvec-val pair w
     ev_l, evec_l = np.linalg.eig(R_mat.T)
 
     idx_r = np.argsort(np.abs(ev_r))[::-1]
     idx_l = np.argsort(np.abs(ev_l))[::-1]
 
     rho     = float(np.abs(ev_r[idx_r[0]]))
+    #sub-dominant eigenvalue (which governs transience)
     lambda2 = float(np.abs(ev_r[idx_r[1]])) if len(idx_r) > 1 else 0.0
 
     w = _perron_real(evec_r[:, idx_r[0]]);  w /= (w.sum() + 1e-300)
     v = _perron_real(evec_l[:, idx_l[0]]);  v /= (v.sum() + 1e-300)
 
-    mix = lambda2 / rho if rho > 0 else 0.0
+    mix = lambda2 / rho if rho > 0 else 0.0 #mixing ratio, how close eigenvals are as a ratio
     cv  = (R_mat.sum(axis=1).std() / R_mat.sum(axis=1).mean()
-           if R_mat.sum(axis=1).mean() > 0 else 0.0)
+           if R_mat.sum(axis=1).mean() > 0 else 0.0) #how variable outward reproduction numbers are (closest to per-location indicator)
 
     return {"rho": rho, "lambda2": lambda2, "mixing_ratio": mix,
             "damping_ratio": rho / lambda2 if lambda2 > 0 else np.inf,
-            "right_eigvec": w,        # right eigvec of R_mat (infector=rows); = reprod. values in Diekmann
-            "left_eigvec": v,         # right eigvec of R_mat.T = right eigvec of Diekmann K^D
-            "stable_distribution": v, # alias: right eigvec of Diekmann K^D = stable spatial distribution
-            "reprod_value": w,        # alias: left eigvec of Diekmann K^D = reproductive value vector
+            # Paper's notation (§3.1.4): v = asymptotic REPRODUCTIVE VALUE (Fisher's,
+            # in Diekmann), v* = stable INFECTION DISTRIBUTION.  R_mat here is the
+            # transpose of the paper's NGM K^D, so the sides swap: the paper's v is a
+            # LEFT eigenvector of K^D and therefore a RIGHT eigenvector of R_mat.
+            "right_eigvec": w,        # = v  (reproductive value): right eigvec of R_mat, left eigvec of K^D
+            "left_eigvec": v,         # = v* (stable distribution): left eigvec of R_mat, right eigvec of K^D
+            "stable_distribution": v, # alias for left_eigvec  = v*
+            "reprod_value": w,        # alias for right_eigvec = v
             "cv_row_sums": cv, "eigenvalues": ev_r[idx_r]}
 
 
@@ -52,6 +57,7 @@ def sensitivity_elasticity(R_mat):
     """Sensitivity, elasticity and eigenvalue condition number of ρ(R) (Eqs 29-33, 38).
 
     In code orientation (R_mat[k, j] = R^{kj}, the transpose of the manuscript NGM):
+    This is because I want interpretation k->j transmission from source to destination
       v = spectral_analysis "left_eigvec"  = manuscript v* (stable distribution, Eq 25)
       w = spectral_analysis "right_eigvec" = manuscript v  (reproductive value, Eq 26)
       sensitivity[k, j] = v_k w_j / (vᵀw) = v_j v*_k / (vᵀv*) = s^{kj}     (Eq 31)

@@ -50,18 +50,13 @@ def type_reproduction_number(R_mat, j):
 
 
 def type_reproduction_numbers(R_mat):
+    """T_j(t) for every location j, as an array of length L.
 
-     """
-
-     Compute T_j(t) for all locations j.  Returns array of length L,
-
-     with np.nan where T_j is undefined (ρ(R_{JJ}) >= 1).
-
-     """
-
-     N = R_mat.shape[0]
-
-     return np.array([type_reproduction_number(R_mat, j) for j in range(N)])
+    np.nan where T_j is undefined (ρ(R_{JJ}) >= 1: the background network can
+    sustain the epidemic without j, so targeting j alone cannot stop it).
+    """
+    N = R_mat.shape[0]
+    return np.array([type_reproduction_number(R_mat, j) for j in range(N)])
 
 
 def type_reproduction_number_group(R_mat, P):

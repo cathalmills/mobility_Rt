@@ -126,7 +126,7 @@ def infector_infectee_elasticity_series(R_mats: np.ndarray):
     """Returns (T,N) ε^k_out = Σ_j ε^{kj} (Eq 34) and (T,N) ε^j_in = Σ_k ε^{kj} (Eq 35).
 
     The two are the same vector for every matrix: both equal v_i v*_i / (vᵀv*), because
-    R v = ℛ v and v*ᵀ R = ℛ v*ᵀ (finding F05).  Both are returned so that Figs 2 and 3
+    R v = ℛ v and v*ᵀ R = ℛ v*ᵀ.  Both are returned so that Figs 2 and 3
     can show that they coincide.
     """
     T, N, _ = R_mats.shape
@@ -540,7 +540,7 @@ def plot_fig02_overview(
     )
 
     # I — infectee elasticity ε^j_in(t) (always tile).  Identical to H for every
-    # matrix (Eqs 34-35, finding F05); drawn on the same colour scale and labelled so.
+    # matrix (Eqs 34-35); drawn on the same colour scale and labelled so.
     ax = fig.add_subplot(gs[2, 2])
     _plot_time_location_tile(
         ax,
@@ -691,7 +691,7 @@ def plot_fig03_taxonomy(
         )
 
     # D — time-mean elasticity marginals.  ε_out and ε_in are the same vector for
-    # every matrix (Eqs 34-35, F05), so every point lies on the diagonal.
+    # every matrix (Eqs 34-35), so every point lies on the diagonal.
     ax = fig.add_subplot(gs[0, 3])
     ax.scatter(mean_eps_out, mean_eps_in, s=55, c=np.arange(N), cmap="tab10", edgecolors="#222", linewidths=0.5)
     for j in range(N):
@@ -763,7 +763,7 @@ def plot_fig03_taxonomy(
     axh.set_ylabel(r"Infector $k$")
 
     # I, J — R̂_ind (a sliding-window estimate) against the matching trailing means of
-    # R^j_in and R^k_out (decision D8)
+    # R^j_in and R^k_out
     win_lbl = f"{ESTIMATOR_WINDOW}-day trailing mean"
     for letter, cell, series, ref_tex in (
         ("I", gs[2, 0], R_in_s, r"\bar{R}^j_{\mathrm{in}}"),
@@ -1096,6 +1096,7 @@ def run_corrected_figures(
     max_days: int,
     scenario_name: str = "Dense urban",
     out_dir: str = "out_figs/corrected",
+    extra_scenarios=None,
 ):
     """Draw the Fig 2 / Fig 3 / Fig 5 set from ALREADY-simulated inputs.
 
@@ -1105,7 +1106,22 @@ def run_corrected_figures(
 
     Writes {out_dir}/fig_* for the time-varying run (manuscript Figs 2, 3, 5) and
     {out_dir}/fig_SI_static_* for the static-mobility run (Figs SI7-SI9).  Returns
-    the list of the two prefixes written.
+    the list of prefixes written, in drawing order.
+
+    extra_scenarios draws the SAME three figures for further alternative scenarios —
+    the heterogeneous-transmissibility counterparts A-het / B-het / C-het and the
+    Scenario B / C baselines they are compared against — so every alternative gets
+    the identical panel set rather than a bespoke one.  Each entry is a dict:
+
+        {"sim": ..., "city_data": ..., "f_series": ..., "R_ind": ...,
+         "gt_snaps": ..., "name": "Dense urban (A-het)", "prefix": "fig_A_het"}
+
+    with an optional "show_dow" (default True, since every alternative scenario runs
+    on a time-varying mobility series), and produces
+    {out_dir}/{prefix}_02_overview[_surface].pdf,
+    {prefix}_03_taxonomy[_surface].pdf and {prefix}_04_spectral.pdf.  Prefixes must
+    be distinct from each other and from the two built-in ones, or one scenario
+    would silently overwrite another's figures.
 
     set_modern_style only sets the rcParams it cares about, so running it on top of
     the pipeline's own style would leave the pipeline's other settings (minor tick
@@ -1127,6 +1143,19 @@ def run_corrected_figures(
          "name": f"{scenario_name} (static mobility)", "prefix": "fig_SI_static",
          "show_dow": False},
     ]
+    for extra in (extra_scenarios or []):
+        missing = sorted({"sim", "city_data", "f_series", "R_ind", "gt_snaps",
+                          "name", "prefix"} - set(extra))
+        if missing:
+            raise KeyError(f"extra scenario {extra.get('name', '?')!r} is missing "
+                           f"key(s): {missing}")
+        scenarios.append(dict(extra))
+
+    prefixes = [sc["prefix"] for sc in scenarios]
+    dupes = sorted({p for p in prefixes if prefixes.count(p) > 1})
+    if dupes:
+        raise ValueError(f"duplicate corrected-figure prefix(es) {dupes}: each "
+                         f"scenario needs its own, or its figures are overwritten")
     for sc in scenarios:
         sc["path_prefix"] = os.path.join(out_dir, sc["prefix"])
 
@@ -1153,7 +1182,8 @@ def run_corrected_figures(
         print("\n─── Figure 5 (spectral) ───")
         for sc in scenarios:
             print(f"  [{sc['name']}]")
-            plot_fig04_spectral(sc["sim"], sc["path_prefix"], show_dow=sc["show_dow"])
+            plot_fig04_spectral(sc["sim"], sc["path_prefix"],
+                                show_dow=sc.get("show_dow", True))
 
     print(f"  Figures written to {os.path.abspath(out_dir)}")
     return [sc["path_prefix"] for sc in scenarios]

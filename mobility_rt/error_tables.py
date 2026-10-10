@@ -19,8 +19,17 @@ resolution.  A Cori/EpiEstim estimate summarises the ESTIMATOR_WINDOW days endin
 at t, so it is scored against the matching trailing mean of rho; a scheme carrying
 no window is scored against rho itself.  rho oscillates with the day-of-week
 commuting cycle, so scoring a smoothed estimate against an unsmoothed reference
-would charge it for its smoothing and its delay rather than for spatial aggregation
-(decision D8).  Which schemes are windowed is declared once, in SCHEMES.
+would charge it for its smoothing and its delay rather than for spatial aggregation.
+Which schemes are windowed is declared once, in SCHEMES, so a windowed scheme can
+never be scored against an instantaneous reference.
+
+PERIOD BOUNDARY.  The periods are defined by the INSTANTANEOUS rho(R(t)) (growth is
+rho(R(t)) > 1), while a windowed scheme is compared with a trailing mean.  The two
+disagree only at the boundary: 3-4 days per scenario have a trailing mean above 1
+while rho itself has already dropped below, and those days fall in `decline`.  No
+scored growth day has a trailing-mean reference at or below 1 in any scenario, so no
+windowed scheme is ever scored against a sub-threshold reference on a day the table
+calls growth.
 
 COMMON DAY MASK.  Within a scenario every scheme is scored on exactly the same
 days: a day counts only when every scheme has a finite estimate there AND both
@@ -51,7 +60,7 @@ RHO_FLOOR = 0.05
 
 # Width of the sliding window used by the Cori/EpiEstim estimators.  A windowed
 # estimate summarises the window [t-w+1, t], so it is scored against the matching
-# trailing mean of rho(R(t)), not against rho at day t alone (decision D8).  The
+# trailing mean of rho(R(t)), not against rho at day t alone.  The
 # delay a window introduces is reported separately, as a threshold-crossing lag.
 ESTIMATOR_WINDOW = _EST_WINDOW
 
@@ -165,11 +174,15 @@ def threshold_crossing_day(series):
 def scored_crossing_day(series, mask):
     """threshold_crossing_day of `series`, counting only the days where mask is True.
 
-    Decision D10: an estimator's crossing is taken on the days the tables and figures
+    An estimator's crossing is taken on the days the tables and figures
     score (every scheme and reference defined, rho above the noise floor).  In the
-    far tail a sliding-window estimate rests on fractions of a case, the prior
-    dominates and the estimate can drift back above 1; those days would otherwise
-    decide when the estimate "settles" below 1.
+    far tail a sliding-window estimate rests on fractions of a case and the prior
+    dominates, so the estimate reports the prior mean rather than the data; those
+    days would otherwise decide when the estimate "settles" below 1.  Under the
+    Gamma(1, 1) prior that limit is 1 itself, approached from below in a decline, so
+    the tail no longer drifts back ABOVE 1 as it did under the mean-5 EpiEstim
+    default; the mask is kept because a day that only reports the prior should not
+    set a crossing either way.
     """
     x = np.asarray(series, dtype=float)
     return threshold_crossing_day(np.where(np.asarray(mask, dtype=bool), x, np.nan))
@@ -189,7 +202,10 @@ def compute_error_table(scenarios, gen_time_pmf):
     if len(set(labels)) != len(labels):
         raise ValueError(f"scenario labels must be unique, got {labels}")
 
-    out = {p: {"labels": labels, "n_days": {},
+    # "days" carries each scenario's scored-day MASK, not just its count, so that
+    # combined_table can check the halves used the same days rather than merely the
+    # same number of them.
+    out = {p: {"labels": labels, "n_days": {}, "days": {},
                "mre": {sch.key: {} for sch in SCHEMES},
                "bias": {sch.key: {} for sch in SCHEMES}} for p in PERIODS}
 
@@ -202,6 +218,7 @@ def compute_error_table(scenarios, gen_time_pmf):
             m = masks[period]
             n = int(m.sum())
             out[period]["n_days"][label] = n
+            out[period]["days"][label] = np.asarray(m, dtype=bool).copy()
             if n == 0:
                 print(f"  WARNING: no usable days for {label} ({period}); "
                       f"reporting NaN")
@@ -265,14 +282,25 @@ def write_error_tables(table, out_dir, prefix="estimator_error"):
         written.append(csv_path)
 
         tex_path = os.path.join(out_dir, f"{prefix}_{period}.tex")
-        period_txt = ("days on which $\\rho(\\mathbf{R}(t))>1$"
-                      if period == "growth"
-                      else f"all days on which $\\rho(\\mathbf{{R}}(t))>{RHO_FLOOR}$")
+        # Both strings must state the FULL mask, not just its rho condition: a day
+        # also needs every scheme and both references finite and above the floor.
+        period_txt = (
+            "days on which $\\rho(\\mathbf{R}(t))>1$ and every scheme and reference "
+            "is defined"
+            if period == "growth"
+            else f"all days on which $\\rho(\\mathbf{{R}}(t))>{RHO_FLOOR}$ and every "
+                 "scheme and reference is defined")
+        # Ties are broken by SCHEMES order, the order the rows are printed in, NOT by
+        # sorting the key strings: min((value, key)) would order a tie between
+        # "ind_Lw" and "ind_am" by ASCII (capitals first) and could bold a different
+        # scheme from the one figures_tables bolds, which takes the first minimum in
+        # this same order.
         best = {}
         for lab in labels:
-            vals = [(d["mre"][sch.key][lab], sch.key) for sch in SCHEMES
+            vals = [(d["mre"][sch.key][lab], i, sch.key)
+                    for i, sch in enumerate(SCHEMES)
                     if not np.isnan(d["mre"][sch.key][lab])]
-            best[lab] = min(vals)[1] if vals else None
+            best[lab] = min(vals)[2] if vals else None
         with open(tex_path, "w", encoding="utf-8") as fh:
             fh.write("% Auto-generated by mobility_rt.error_tables - do not edit by hand.\n")
             fh.write("% Requires \\usepackage{booktabs} for \\toprule/\\midrule/\\bottomrule.\n")

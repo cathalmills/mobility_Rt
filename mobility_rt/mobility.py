@@ -9,6 +9,10 @@ def generate_mobility(n_locations, T, populations, distances, meta,
     Time-varying row-stochastic mobility series f_jk of shape (T, N, N), where
     f_jk[t, j, k] is the probability that a resident of j is in location k on day t.
 
+    SIMPLIFICATION: mobility has a daily resolution only.  There is one share per
+    resident per day, so nobody moves within a day and no journey is modelled; a
+    commuter contributes to their destination for the whole of day t.
+
     Base matrix (Appendix A), with c_j = meta["commuting_fracs"][j] and
     δ = meta["decay_scale"]:
       base_f[j, j] = 1 - c_j
@@ -52,8 +56,10 @@ def generate_mobility(n_locations, T, populations, distances, meta,
 
     # ── time-varying f_jk(t) ────────────────────────────────────────────────
     dow_scale = np.asarray(DOW_SCALE, dtype=float)
+    #f_jk = 3-D array, first dim = TIME, then locs, rows = home residence loc
     f_jk = np.zeros((T, N, N))
     for t in range(T):
+        #dow gets extra randomness from log-normal draw
         scale = dow_scale[t % 7] * float(
             np.clip(rng.lognormal(0.0, day_variation_sd), XI_CLIP[0], XI_CLIP[1]))
 
@@ -68,5 +74,6 @@ def generate_mobility(n_locations, T, populations, distances, meta,
             rs = f_jk[t, j].sum()
             if rs > 1e-15:
                 f_jk[t, j] /= rs
+        
 
     return f_jk, base_f

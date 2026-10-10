@@ -355,7 +355,7 @@ class TestMobilityRt(unittest.TestCase):
             msg=f"Euler-Lotka residual={residual_low:.2e} for rho=0.5")
 
     def test_euler_lotka_reference_values_and_no_silent_except(self):
-        """F18: known roots for the model pmf; NaN (not an exception) when the root lies
+        """Known roots for the model pmf; NaN (not an exception) when the root lies
         outside the bracket |r| <= 2 per day; and no exception handler that could turn
         a solver failure into a silent NaN."""
         import inspect
@@ -366,7 +366,7 @@ class TestMobilityRt(unittest.TestCase):
         self.assertNotIn("except", inspect.getsource(euler_lotka_r))
 
     def test_importing_the_package_leaves_warning_filters_unchanged(self):
-        """F15: importing mobility_rt must not silence warnings process-wide.
+        """Importing mobility_rt must not silence warnings process-wide.
 
         The filter list is emptied first: the package is already imported by the time
         this runs, and re-adding an identical "ignore" filter would leave a non-empty
@@ -419,7 +419,9 @@ class TestMobilityRt(unittest.TestCase):
                 res["sigma"], -1e-12,
                 msg=f"sigma={res['sigma']:.6f} is negative")
 
-        # Symmetric positive matrix: sigma == rho (because (R+R^T)/2 = R)
+        # Symmetric positive matrix: sigma == rho, because the singular values of a
+        # symmetric matrix are the absolute values of its eigenvalues, so the largest
+        # singular value (Eq 37) equals the spectral radius.
         R_sym = rng.uniform(0.5, 1.5, (4, 4))
         R_sym = (R_sym + R_sym.T) / 2.0
         res_sym = reactivity(R_sym)
@@ -753,11 +755,17 @@ class TestMobilityRt(unittest.TestCase):
         pmf = discretise_gamma(5.5, 1.8, 25)
         np.testing.assert_allclose(pmf, mc / mc.sum(), atol=3e-3)
 
-    def test_estimator_prior_is_epiestim_default(self):
-        """Prior must be EpiEstim's default (mean 5), not mean 0.2 — this is C1.
-        Posterior at zero data equals the prior mean R_PRIOR_SHAPE/R_PRIOR_RATE."""
-        self.assertAlmostEqual(R_PRIOR_SHAPE / R_PRIOR_RATE, 5.0, places=6,
-                               msg="independent-estimator prior mean must be 5 (EpiEstim default)")
+    def test_estimator_prior_has_mean_one(self):
+        """Prior mean must be 1, NOT EpiEstim's default of 5.
+
+        A prior mean of 1 is the only one that cannot move a threshold crossing:
+        the posterior mean is a weighted average of the prior mean and the data
+        ratio, so centring it at 1 leaves sign(R-1) to the data alone.
+        """
+        self.assertAlmostEqual(R_PRIOR_SHAPE / R_PRIOR_RATE, 1.0, places=6,
+                               msg="independent-estimator prior mean must be 1")
+        # the shape is one pseudo-case, as in EpiEstim: only the centre moved
+        self.assertAlmostEqual(R_PRIOR_SHAPE, 1.0, places=12)
         # One case is the smallest observable count; anything larger is arbitrary.
         self.assertEqual(_cfg.R_MIN_WINDOW_CASES, 1.0)
         self.assertFalse(hasattr(_cfg, "R_MIN_WINDOW_INCIDENCE"),
@@ -1084,20 +1092,42 @@ class TestHeterogeneousSimulation(unittest.TestCase):
                            1e-3 * base["incidence"].max())
 
     def test_incidence_matches_its_own_R_matrix(self):
-        """E_j(t,0) = Σ_k R_kj(t) Λ_k(t) / Σ_{a≥1} p(a), exactly, with and without
-        heterogeneity — the identity that makes R(t) the NGM of these dynamics."""
+        """E_j(t,0) = Σ_k R_kj(t) Λ_k(t) / Σ_{a≥1} p(a), with and without
+        heterogeneity — the identity that makes R(t) the NGM of these dynamics.
+
+        Exact for update="euler", whose boundary condition is linear in S.  The
+        default exponential update depletes S over the day, so there the identity
+        holds only to first order in the daily force of infection φ: the relative
+        shortfall of S(1−e^{−φ}) against Sφ is φ/2 + O(φ²), checked against the φ
+        each run actually produced."""
+        sum_w = self.p[1:].sum()
         for kw in ({}, dict(contact_mult=self.c),
                    dict(infect_mult=self.m),
                    dict(contact_mult=self.c, infect_mult=self.m)):
-            sim = self._sim(**kw)
+            sim = self._sim(update="euler", **kw)
             E = sim["E_pde_state"]
-            sum_w = self.p[1:].sum()
             for t in range(1, 25):     # early days: no susceptible clamping
                 lam = E[t, :, 1:] @ self.p[1:]
                 pred = sim["R_matrices"][t].T @ lam / sum_w
                 np.testing.assert_allclose(
                     sim["incidence"][t], pred, rtol=1e-9, atol=1e-9,
                     err_msg=f"incidence != R^T Λ / Σp at t={t} for {kw}")
+
+            exp_sim = self._sim(**kw)          # default: exponential escape
+            E = exp_sim["E_pde_state"]
+            for t in range(1, 25):
+                lam  = E[t, :, 1:] @ self.p[1:]
+                pred = exp_sim["R_matrices"][t].T @ lam / sum_w        # = S_j φ_j
+                S    = np.maximum(exp_sim["S_start"][t], 1e-30)
+                phi  = pred / S
+                rel  = np.where(pred > 0, (pred - exp_sim["incidence"][t])
+                                / np.maximum(pred, 1e-30), 0.0)
+                # RELATIVE tolerance: on this fixture φ/2 is O(1e-5), so an absolute
+                # tolerance of 1e-3 would be satisfied by rel ≡ 0 as well, i.e. by a
+                # linear update.  The residual must track φ/2 itself, to O(φ).
+                np.testing.assert_allclose(
+                    rel, phi / 2, rtol=1e-2, atol=1e-12,
+                    err_msg=f"exponential residual is not φ/2 at t={t} for {kw}")
 
     def test_heterogeneity_recorded_in_output(self):
         sim = self._sim(contact_mult=self.c, infect_mult=self.m)
@@ -1171,6 +1201,8 @@ class TestHeterogeneityParameters(unittest.TestCase):
 import csv as _csv
 import os as _os
 import tempfile as _tempfile
+
+import numpy as _np_for_fixture
 
 from mobility_rt.error_tables import (
     ESTIMATOR_WINDOW,
@@ -1476,10 +1508,10 @@ class TestErrorTables(unittest.TestCase):
     def test_bias_figure_rejects_a_scheme_with_unknown_smoothing(self):
         """A middle-column key absent from SCHEMES has no known reference, so the
         figure must refuse rather than silently pick one."""
-        from mobility_rt.plotting.figures_main import _plot_main_bias_3x3
+        from mobility_rt.plotting.figures_main import _plot_main_bias_grid
         d = _compute_naive_suite(self.sim, self.city, self.gt)
         with self.assertRaises(KeyError):
-            _plot_main_bias_3x3([(d, "a"), (d, "b"), (d, "c")],
+            _plot_main_bias_grid([(d, "a"), (d, "b"), (d, "c")],
                                 "not_a_scheme", "unused.pdf")
 
     def test_duplicate_scenario_labels_rejected(self):
@@ -1546,6 +1578,388 @@ class TestErrorTables(unittest.TestCase):
                 self.assertEqual(tex.count("\\begin{table}"), 1)
                 self.assertEqual(tex.count("\\end{table}"), 1)
 
+
+# ---------------------------------------------------------------------------
+# Per-location discrepancy of the independent estimate
+# ---------------------------------------------------------------------------
+
+from mobility_rt.location_errors import (
+    COMPARATORS,
+    _spearman,
+    compute_diagnostics_table,
+    compute_location_table,
+    location_diagnostics,
+    location_discrepancies,
+    write_diagnostics_table,
+    write_location_table,
+)
+
+
+class TestLocationDiscrepancy(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.N, cls.T = 6, 260
+        params = COVID_PARAMS
+        cls.gt = discretise_gamma(params["gen_time_mean"], params["gen_time_sd"],
+                                  params["max_gen_time"])
+        cls.city = generate_city(cls.N, scenario="lagos", seed=6)
+        f, base_f = generate_mobility(cls.N, cls.T, cls.city[1], cls.city[2],
+                                      cls.city[4], seed=6)
+        init = np.zeros(cls.N); init[0] = 10.0
+        LW = params["base_contact_rate"]
+        cls.sim = simulate_epidemic_pde(
+            cls.T, cls.N, cls.city[1], f, params["prob_transmission_peak"], cls.gt,
+            params["max_gen_time"], params["R0_target"], init, LW, LW * 0.30,
+            f_calibration=base_f)
+        cls.d = location_discrepancies(cls.sim, cls.gt)
+
+    def test_no_unused_parameters(self):
+        import inspect
+        sig = inspect.signature(location_discrepancies)
+        self.assertEqual(list(sig.parameters), ["sim", "gen_time_pmf"])
+        src = inspect.getsource(location_discrepancies)
+        for name in sig.parameters:
+            self.assertGreater(src.count(name), 1, f"{name} is never read")
+
+    def test_shapes_and_positivity(self):
+        for key, _, _ in COMPARATORS:
+            self.assertEqual(len(self.d[key]["mre"]), self.N)
+            self.assertEqual(len(self.d[key]["bias"]), self.N)
+            self.assertTrue(np.all(self.d[key]["mre"] >= 0.0))
+            self.assertTrue(np.all(np.isfinite(self.d[key]["mre"])))
+        self.assertGreater(self.d["n_days"], 0)
+
+    def test_mre_dominates_bias_per_location(self):
+        for key, _, _ in COMPARATORS:
+            self.assertTrue(np.all(self.d[key]["mre"] + 1e-9
+                                   >= np.abs(self.d[key]["bias"])),
+                            f"{key}: |bias| exceeds mean absolute error")
+
+    def test_recomputed_by_hand(self):
+        """Independent re-derivation of one comparator, including the matched
+        trailing-mean reference."""
+        from mobility_rt.kernel import R_outward, R_system
+        inc = self.sim["incidence"]
+        Rm = self.sim["R_matrices"]
+        T, N = inc.shape
+        rho = np.array([R_system(Rm[t]) for t in range(T)])
+        Ro = np.array([R_outward(Rm[t]) for t in range(T)])
+        Rh = estimate_R_independent(inc, self.gt, window=ESTIMATOR_WINDOW)
+        ref_net = trailing_mean(rho, ESTIMATOR_WINDOW)
+        ref_own = np.column_stack([trailing_mean(Ro[:, j], ESTIMATOR_WINDOW)
+                                   for j in range(N)])
+        days = (rho > 1.0) & ~np.isnan(Rh).any(axis=1)
+        days &= np.isfinite(ref_net) & (ref_net > RHO_FLOOR)
+        days &= (np.isfinite(ref_own) & (ref_own > RHO_FLOOR)).all(axis=1)
+        self.assertEqual(int(days.sum()), self.d["n_days"])
+        rel = (Rh[days] - ref_own[days]) / ref_own[days]
+        np.testing.assert_allclose(self.d["own"]["mre"],
+                                   np.mean(np.abs(rel), axis=0) * 100, rtol=1e-12)
+        rel_n = (Rh[days] - ref_net[days, None]) / ref_net[days, None]
+        np.testing.assert_allclose(self.d["net"]["mre"],
+                                   np.mean(np.abs(rel_n), axis=0) * 100, rtol=1e-12)
+
+    def test_estimate_is_closer_to_the_network_than_to_its_own_R_out(self):
+        """The finding the table exists to report, as a median statement."""
+        self.assertLess(np.median(self.d["net"]["mre"]),
+                        np.median(self.d["own"]["mre"]))
+
+    def test_duplicate_labels_and_empty_rejected(self):
+        with self.assertRaises(ValueError):
+            compute_location_table([], self.gt)
+        with self.assertRaises(ValueError):
+            compute_location_table([("X", self.sim, self.city),
+                                    ("X", self.sim, self.city)], self.gt)
+
+    def test_files_written_and_parseable(self):
+        tbl = compute_location_table([("One", self.sim, self.city)], self.gt)
+        with _tempfile.TemporaryDirectory() as d:
+            paths = write_location_table(tbl, d, prefix="loc")
+            self.assertEqual(len(paths), 2)
+            rows = list(_csv.reader(open(_os.path.join(d, "loc.csv"))))
+            self.assertEqual(len({len(r) for r in rows}), 1)
+            self.assertEqual(rows[-1][1], "days used")
+            for r in rows[1:-1]:
+                float(r[3])                       # every value numeric
+            tex = open(_os.path.join(d, "loc.tex")).read()
+            self.assertIn("booktabs", tex)
+            self.assertEqual(tex.count("\\begin{table}"), 1)
+
+    # -- diagnostics ------------------------------------------------------
+    def test_spearman_matches_scipy_and_handles_edges(self):
+        from scipy.stats import spearmanr
+        rng = np.random.default_rng(3)
+        for _ in range(8):
+            a, b = rng.normal(size=9), rng.normal(size=9)
+            self.assertAlmostEqual(_spearman(a, b), spearmanr(a, b).statistic,
+                                   places=12)
+        # ties get average ranks, matching scipy
+        t, u = np.array([1., 2., 2., 3.]), np.array([4., 3., 3., 1.])
+        self.assertAlmostEqual(_spearman(t, u), spearmanr(t, u).statistic, places=12)
+        # a flat input has an UNDEFINED correlation, not zero
+        self.assertTrue(np.isnan(_spearman(np.ones(5), np.arange(5.))))
+        with self.assertRaises(ValueError):
+            _spearman(np.ones(3), np.ones(4))
+
+    def test_diagnostics_ranges_are_sane(self):
+        d = location_diagnostics(self.sim, self.gt)
+        self.assertGreaterEqual(d["rank_q1"], -1.0)
+        self.assertLessEqual(d["rank_q3"], 1.0)
+        self.assertLessEqual(d["rank_q1"], d["rank_median"])
+        self.assertLessEqual(d["rank_median"], d["rank_q3"])
+        for k in ("agree_growth", "agree_own"):
+            self.assertGreaterEqual(d[k], 0.0)
+            self.assertLessEqual(d[k], 100.0)
+        for k in ("cv_est", "cv_true", "net_median"):
+            self.assertGreater(d[k], 0.0)
+        self.assertGreater(d["n_days"], 0)
+
+    def test_diagnostics_recomputed_by_hand(self):
+        from mobility_rt.kernel import R_outward, R_system
+        inc = self.sim["incidence"]; Rm = self.sim["R_matrices"]
+        T, N = inc.shape
+        rho = np.array([R_system(Rm[t]) for t in range(T)])
+        Ro = np.array([R_outward(Rm[t]) for t in range(T)])
+        Rh = estimate_R_independent(inc, self.gt, window=ESTIMATOR_WINDOW)
+        rn = trailing_mean(rho, ESTIMATOR_WINDOW)
+        ro = np.column_stack([trailing_mean(Ro[:, j], ESTIMATOR_WINDOW)
+                              for j in range(N)])
+        days = (rho > 1.0) & ~np.isnan(Rh).any(axis=1)
+        days &= np.isfinite(rn) & (rn > RHO_FLOOR)
+        days &= (np.isfinite(ro) & (ro > RHO_FLOOR)).all(axis=1)
+        d = location_diagnostics(self.sim, self.gt)
+        self.assertEqual(int(days.sum()), d["n_days"])
+        rs = np.array([_spearman(Rh[t], ro[t]) for t in np.where(days)[0]])
+        rs = rs[np.isfinite(rs)]
+        self.assertAlmostEqual(d["rank_median"], float(np.median(rs)), places=12)
+        self.assertAlmostEqual(
+            d["cv_true"],
+            float(np.median(ro[days].std(axis=1) / ro[days].mean(axis=1))) * 100,
+            places=10)
+        self.assertAlmostEqual(
+            d["agree_own"],
+            float(np.mean((Rh[days] > 1.0) == (ro[days] > 1.0)) * 100), places=10)
+
+    def test_both_entry_points_share_one_day_mask(self):
+        """The mask must live in exactly one place, or the two tables could end up
+        scored on different days without anything failing."""
+        import inspect
+        from mobility_rt import location_errors as _le
+        for fn in (_le.location_discrepancies, _le.location_diagnostics):
+            src = inspect.getsource(fn)
+            self.assertIn("_prepare(sim, gen_time_pmf)", src,
+                          f"{fn.__name__} does not use the shared preparation")
+            self.assertNotIn("days &=", src,
+                             f"{fn.__name__} rebuilds the day mask")
+        self.assertEqual(location_diagnostics(self.sim, self.gt)["n_days"],
+                         location_discrepancies(self.sim, self.gt)["n_days"])
+
+    def test_net_median_matches_the_discrepancy_module(self):
+        self.assertAlmostEqual(
+            location_diagnostics(self.sim, self.gt)["net_median"],
+            float(np.median(location_discrepancies(self.sim, self.gt)["net"]["mre"])),
+            places=12)
+
+    def test_growth_agreement_uses_two_complete_windows(self):
+        """The first two windows cannot be compared week on week, so they must be
+        excluded; including them would compare against an incomplete baseline.
+
+        Checked behaviourally, on a mask forced to include day 0: grepping the
+        source for "2 * ESTIMATOR_WINDOW" would also pass for an off-by-one.
+        """
+        from unittest import mock
+        from mobility_rt import location_errors as _le
+        R_hat, ref_own, ref_net, days = _le._prepare(self.sim, self.gt)
+        wide = np.ones_like(days)                 # every day "scored"
+        with mock.patch.object(_le, "_prepare",
+                               return_value=(R_hat, ref_own, ref_net, wide)):
+            d = _le.location_diagnostics(self.sim, self.gt)
+        # 2W - 1 = 13 is the first day with two complete windows behind it, and the
+        # exclusion applies to the cases-rising row ALONE: narrowing the whole block
+        # would put this half on a different day set from the network half.
+        self.assertEqual(d["n_growth"], len(wide) - (2 * ESTIMATOR_WINDOW - 1))
+        self.assertEqual(d["n_days"], len(wide))
+
+    def test_the_day_mask_admits_exactly_the_days_that_qualify(self):
+        """The mask's DEFINITION, not a copy of its code.
+
+        The two "recomputed by hand" tests rebuild _prepare's mask line for line, so
+        they would reproduce a wrong mask.  This one states the four conditions
+        independently and requires every scored day to meet all of them and every
+        excluded day to fail at least one.
+        """
+        from mobility_rt.kernel import R_outward, R_system
+        from mobility_rt.location_errors import _prepare
+        R_hat, ref_own, ref_net, days = _prepare(self.sim, self.gt)
+        Rm = self.sim["R_matrices"]
+        T = len(Rm)
+        rho = np.array([R_system(Rm[t]) for t in range(T)])
+        Ro = np.array([R_outward(Rm[t]) for t in range(T)])
+        ref_n = trailing_mean(rho, ESTIMATOR_WINDOW)
+        ref_o = np.column_stack([trailing_mean(Ro[:, j], ESTIMATOR_WINDOW)
+                                 for j in range(Ro.shape[1])])
+        for t in range(T):
+            qualifies = (rho[t] > 1.0
+                         and np.all(np.isfinite(R_hat[t]))
+                         and np.isfinite(ref_n[t]) and ref_n[t] > RHO_FLOOR
+                         and np.all(np.isfinite(ref_o[t]))
+                         and np.all(ref_o[t] > RHO_FLOOR))
+            self.assertEqual(bool(days[t]), bool(qualifies),
+                             f"day {t}: mask says {days[t]}, conditions say {qualifies}")
+        self.assertGreater(int(days.sum()), 0)
+        self.assertLess(int(days.sum()), T, "no day was excluded; mask untested")
+
+    def test_growth_agreement_value_recomputed_independently(self):
+        """agree_growth is a manuscript-table row and had no numerical test."""
+        from mobility_rt.location_errors import _prepare
+        R_hat, _ref_own, _ref_net, days = _prepare(self.sim, self.gt)
+        inc = self.sim["incidence"]
+        T, N = inc.shape
+        days = days.copy()
+        days[:2 * ESTIMATOR_WINDOW - 1] = False
+        hits = total = 0
+        for t in np.where(days)[0]:
+            for j in range(N):
+                this_week = inc[t - ESTIMATOR_WINDOW + 1:t + 1, j].sum()
+                last_week = inc[t - 2 * ESTIMATOR_WINDOW + 1:t - ESTIMATOR_WINDOW + 1, j].sum()
+                hits += int((R_hat[t, j] > 1.0) == (this_week > last_week))
+                total += 1
+        want = 100.0 * hits / total
+        self.assertAlmostEqual(location_diagnostics(self.sim, self.gt)["agree_growth"],
+                               want, places=10)
+
+    def test_diagnostics_files_written(self):
+        tbl = compute_diagnostics_table([("One", self.sim, self.city)], self.gt)
+        with _tempfile.TemporaryDirectory() as d:
+            paths = write_diagnostics_table(tbl, d, prefix="dg")
+            self.assertEqual(len(paths), 2)
+            rows = list(_csv.reader(open(_os.path.join(d, "dg.csv"))))
+            self.assertEqual(len({len(r) for r in rows}), 1)
+            self.assertEqual(rows[-1][0], "Days used")
+            for r in rows[1:-1]:
+                float(r[1])
+            tex = open(_os.path.join(d, "dg.tex")).read()
+            self.assertIn("booktabs", tex)
+            self.assertEqual(tex.count("\\begin{table}"), 1)
+
+
+# ---------------------------------------------------------------------------
+# Table SI3: the combined network- and location-level table
+# ---------------------------------------------------------------------------
+
+from mobility_rt.combined_table import (
+    _LOCATION_ROWS,
+    PERIOD,
+    compute_combined_table,
+    write_combined_table,
+)
+
+
+class TestCombinedManuscriptTable(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.N, cls.T = 6, 260
+        params = COVID_PARAMS
+        cls.gt = discretise_gamma(params["gen_time_mean"], params["gen_time_sd"],
+                                  params["max_gen_time"])
+        cls.city = generate_city(cls.N, scenario="lagos", seed=6)
+        f, base_f = generate_mobility(cls.N, cls.T, cls.city[1], cls.city[2],
+                                      cls.city[4], seed=6)
+        init = np.zeros(cls.N); init[0] = 10.0
+        LW = params["base_contact_rate"]
+        cls.sim = simulate_epidemic_pde(
+            cls.T, cls.N, cls.city[1], f, params["prob_transmission_peak"], cls.gt,
+            params["max_gen_time"], params["R0_target"], init, LW, LW * 0.30,
+            f_calibration=base_f)
+        cls.scen = [("One", cls.sim, cls.city), ("Two", cls.sim, cls.city)]
+        cls.table = compute_combined_table(cls.scen, cls.gt)
+
+    def test_values_are_lifted_unchanged_from_the_sources(self):
+        """Nothing may be recomputed: every cell must equal its source table."""
+        net = compute_error_table(self.scen, self.gt)
+        loc = compute_location_table(self.scen, self.gt)
+        diag = compute_diagnostics_table(self.scen, self.gt)
+        for lab in ("One", "Two"):
+            for sch in SCHEMES:
+                mre, bias = self.table["network"][sch.key][lab]
+                self.assertAlmostEqual(mre, net[PERIOD]["mre"][sch.key][lab], places=12)
+                self.assertAlmostEqual(bias, net[PERIOD]["bias"][sch.key][lab],
+                                       places=12)
+            for key, source, _, _, _ in _LOCATION_ROWS:
+                want = (diag[lab][key] if source == "diag"
+                        else float(np.median(loc[lab][key]["mre"])))
+                self.assertAlmostEqual(self.table["location"][key][lab], want,
+                                       places=12)
+            self.assertEqual(self.table["n_days"][lab], net[PERIOD]["n_days"][lab])
+
+    def test_refuses_when_the_halves_used_different_days(self):
+        """The whole point of one table is one day set; a mismatch must be fatal."""
+        import copy
+        net = compute_error_table(self.scen, self.gt)
+        loc = compute_location_table(self.scen, self.gt)
+        diag = compute_diagnostics_table(self.scen, self.gt)
+        bad = copy.deepcopy(diag)
+        bad["One"]["n_days"] += 1
+        with self.assertRaises(ValueError):
+            compute_combined_table(self.scen, self.gt, net, loc, bad)
+
+    def test_refuses_mismatched_scenarios(self):
+        net = compute_error_table(self.scen, self.gt)
+        loc = compute_location_table(self.scen, self.gt)
+        diag = compute_diagnostics_table([("One", self.sim, self.city)], self.gt)
+        with self.assertRaises(ValueError):
+            compute_combined_table(self.scen, self.gt, net, loc, diag)
+        with self.assertRaises(ValueError):
+            compute_combined_table([], self.gt)
+        with self.assertRaises(ValueError):
+            compute_combined_table([("X", self.sim, self.city),
+                                    ("X", self.sim, self.city)], self.gt)
+
+    def test_files_written_and_well_formed(self):
+        with _tempfile.TemporaryDirectory() as d:
+            paths = write_combined_table(self.table, d, prefix="mt")
+            self.assertEqual(len(paths), 2)
+            rows = list(_csv.reader(open(_os.path.join(d, "mt.csv"))))
+            self.assertEqual(len({len(r) for r in rows}), 1)
+            self.assertEqual(len(rows),
+                             1 + 2 * len(SCHEMES) + len(_LOCATION_ROWS) + 1)
+            self.assertEqual(rows[-1][1], "Days used")
+            for r in rows[1:-1]:
+                for c in r[4:]:
+                    float(c)
+                self.assertNotIn("\\", r[1])
+            tex = open(_os.path.join(d, "mt.tex")).read()
+            errs = _tex_structure_errors(tex)
+            self.assertEqual(errs, [], f"LaTeX problems: {errs}")
+
+    def test_every_generated_tex_table_is_structurally_valid(self):
+        """Guards all four writers at once, including the brace balance that a
+        mixed f-string / plain-string literal silently breaks."""
+        from mobility_rt import error_tables as _et, location_errors as _le
+        with _tempfile.TemporaryDirectory() as d:
+            n = len(self.table["labels"])
+            net = compute_error_table(self.scen, self.gt)
+            loc = compute_location_table(self.scen, self.gt)
+            diag = compute_diagnostics_table(self.scen, self.gt)
+            written = []
+            written += _et.write_error_tables(net, d, prefix="e")
+            written += _le.write_location_table(loc, d, prefix="l")
+            written += _le.write_diagnostics_table(diag, d, prefix="g")
+            written += write_combined_table(self.table, d, prefix="m")
+            tex_files = [p for p in written if p.endswith(".tex")]
+            self.assertEqual(len(tex_files), 5)   # growth, full, loc, diag, combined
+            for path in tex_files:
+                body = open(path).read()
+                errs = _tex_structure_errors(body)
+                self.assertEqual(errs, [], f"{_os.path.basename(path)}: {errs}")
+                # and the preamble must actually match the scenario count
+                import re
+                pre = re.search(r"\\begin\{tabular\}\{([^}]*)\}", body).group(1)
+                self.assertEqual(sum(1 for c in pre if c == "r"), n,
+                                 f"{_os.path.basename(path)}: wrong number of "
+                                 f"numeric columns for {n} scenarios")
 
 
 # ---------------------------------------------------------------------------
@@ -1632,7 +2046,8 @@ class TestForwardGTUnderHeterogeneity(unittest.TestCase):
 
 
 class TestCorrectedFigureScenarios(unittest.TestCase):
-    """The corrected Fig 2 / Fig 3 / Fig 5 set (and its static-mobility twin)."""
+    """The corrected Fig 2 / Fig 3 / Fig 5 set, its static-mobility twin, and the
+    identical set every alternative scenario (A-het, B, B-het, C, C-het) gets."""
 
     @classmethod
     def setUpClass(cls):
@@ -1656,6 +2071,10 @@ class TestCorrectedFigureScenarios(unittest.TestCase):
                       lambda_between=LW * 0.30, f_calibration=base_f)
         cls.sim = simulate_epidemic_pde(cls.T, cls.N, pops, cls.f, **common)
         cls.sim_s = simulate_epidemic_pde(cls.T, cls.N, pops, cls.f_static, **common)
+        cls.sim_h = simulate_epidemic_pde(
+            cls.T, cls.N, pops, cls.f,
+            contact_mult=contact_multipliers(cls.city[3]),
+            infect_mult=infectiousness_multipliers(cls.N, seed=9), **common)
         cls.gt = {"peak": compute_generation_times(
             cls.f[20], cls.sim["S_start"][20], pops,
             params["prob_transmission_peak"], cls.p, cls.max_days,
@@ -1686,11 +2105,48 @@ class TestCorrectedFigureScenarios(unittest.TestCase):
                     self.assertIn(pfx + suffix, names)
             self.assertEqual(len(names), 10)
 
+    def test_each_extra_scenario_gets_the_full_file_set(self):
+        import os as _os, tempfile
+        run, kw = self._args()
+        extra = {"sim": self.sim_h, "city_data": self.city, "f_series": self.f,
+                 "R_ind": self.R_ind, "gt_snaps": self.gt,
+                 "name": "Dense urban (A-het)", "prefix": "fig_A_het"}
+        with tempfile.TemporaryDirectory() as d:
+            prefixes = run(out_dir=d, extra_scenarios=[extra], **kw)
+            self.assertEqual(len(prefixes), 3)
+            names = set(_os.listdir(d))
+            for pfx in ("fig", "fig_SI_static", "fig_A_het"):
+                for suffix in ("_02_overview.pdf", "_02_overview_surface.pdf",
+                               "_03_taxonomy.pdf", "_03_taxonomy_surface.pdf",
+                               "_04_spectral.pdf"):
+                    self.assertIn(pfx + suffix, names)
+            # three scenarios x five files, and nothing else
+            self.assertEqual(len(names), 15)
+
+    def test_a_duplicate_prefix_is_refused_rather_than_overwriting(self):
+        import tempfile
+        run, kw = self._args()
+        extra = {"sim": self.sim_h, "city_data": self.city, "f_series": self.f,
+                 "R_ind": self.R_ind, "gt_snaps": self.gt,
+                 "name": "clash", "prefix": "fig_SI_static"}
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):
+                run(out_dir=d, extra_scenarios=[extra], **kw)
+
+    def test_an_incomplete_extra_scenario_is_refused(self):
+        import tempfile
+        run, kw = self._args()
+        extra = {"sim": self.sim_h, "city_data": self.city, "f_series": self.f,
+                 "name": "incomplete", "prefix": "fig_x"}
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(KeyError):
+                run(out_dir=d, extra_scenarios=[extra], **kw)
+
 
 
 
 # ---------------------------------------------------------------------------
-# Oracle tests for the fix-plan corrections (docs/FIX_PLAN.md, Phase 3)
+# Oracle tests: each manuscript quantity against an independent computation
 # ---------------------------------------------------------------------------
 #
 # Each class compares one manuscript quantity with an independent computation
@@ -1719,7 +2175,7 @@ def _small_run(contact_mult=None, infect_mult=None, T=60, N=6, seed=3):
 
 
 class TestStartOfDaySusceptibles(unittest.TestCase):
-    """F03: R_matrices[t] and the day-t force of infection use START-of-day S."""
+    """R_matrices[t] and the day-t force of infection use START-of-day S."""
 
     @classmethod
     def setUpClass(cls):
@@ -1760,7 +2216,7 @@ class TestStartOfDaySusceptibles(unittest.TestCase):
             np.testing.assert_allclose(S_eff[t], f[t].T @ sim["S_start"][t], rtol=1e-14)
 
     def test_calibration_is_exact_on_the_calibration_matrix(self):
-        """D5: ρ(R) = R0 for a fully susceptible population under f_calibration."""
+        """ρ(R) = R0 for a fully susceptible population under f_calibration."""
         pp = COVID_PARAMS["prob_transmission_peak"]
         for tag, ((sim, city, f, base_f, p), kw) in self.runs.items():
             R_cal = compute_R_matrix(base_f, city[1], city[1], pp, p,
@@ -1772,7 +2228,7 @@ class TestStartOfDaySusceptibles(unittest.TestCase):
 
 
 class TestMeetingLocationEq50(unittest.TestCase):
-    """F06: R^l_meeting is Eq 50, Σ_j Σ_k f^{jl} S_j f^{kl} λ^{kl} over a_E >= 1."""
+    """R^l_meeting is Eq 50, Σ_j Σ_k f^{jl} S_j f^{kl} λ^{kl} over a_E >= 1."""
 
     @classmethod
     def setUpClass(cls):
@@ -1820,7 +2276,7 @@ class TestMeetingLocationEq50(unittest.TestCase):
 
 
 class TestNetworkGenerationTimeEq27(unittest.TestCase):
-    """F42: g_network is Eqs 27-28, eigenvector-weighted, not the unweighted sum."""
+    """g_network is Eqs 27-28, eigenvector-weighted, not the unweighted sum."""
 
     def test_eigenvector_weighted_gt_is_eqs_27_28_for_a_nonseparable_kernel(self):
         import scipy.linalg
@@ -1873,7 +2329,7 @@ class TestNetworkGenerationTimeEq27(unittest.TestCase):
 
 
 class TestInfectiousnessWeighting(unittest.TestCase):
-    """D12: network aggregates weighted by total infectiousness Λ_j (ref [68])."""
+    """Network aggregates weighted by total infectiousness Λ_j (ref [68])."""
 
     def test_total_infectiousness_matches_the_forward_model(self):
         from mobility_rt.estimators import total_infectiousness
@@ -1888,12 +2344,19 @@ class TestInfectiousnessWeighting(unittest.TestCase):
         np.testing.assert_allclose(total_infectiousness(inc, p), want, rtol=1e-13)
 
     def test_hand_computed_two_location_example(self):
-        """p puts all mass on lag 1 and incidence is constant (10 and 30 per day), so
-        Λ_j(t) = I_j(t-1) and every window sum is 7 I_j; R_out = (3, 7)."""
+        """Weights, by hand, on constant incidence (10 and 30 per day); R_out = (3, 7).
+
+        The profile puts weight 0.4 on lag 1 and 0.2 on lag 2, so Λ_j(t) = 0.6 I_j and
+        each window carries Σ I = 7 I_j against Σ Λ = 4.2 I_j.  It deliberately does
+        NOT sum to 1: with a normalised profile and constant incidence the window sums
+        would satisfy ΣI = ΣΛ, every R̂_j would be exactly (1+ΣI)/(1+ΣI) = 1 under the
+        Gamma(1, 1) prior, and the fixture could no longer tell one weighting from
+        another.  The final assertion pins that discrimination.
+        """
         T = 20
         inc = np.zeros((T, 2))
         inc[:, 0], inc[:, 1] = 10.0, 30.0
-        p = np.array([0.0, 1.0, 0.0])
+        p = np.array([0.0, 0.4, 0.2])
         sim = {"incidence": inc,
                "R_matrices": np.tile(np.array([[1.0, 2.0], [3.0, 4.0]]), (T, 1, 1))}
         city = (None, np.array([1.0, 1.0]), None, ["core", "core"], {})
@@ -1901,11 +2364,16 @@ class TestInfectiousnessWeighting(unittest.TestCase):
         self.assertNotIn("ind_iw", s)
         self.assertNotIn("out_iw", s)
         t = 10
-        R1 = (R_PRIOR_SHAPE + 70.0) / (R_PRIOR_RATE + 70.0)
-        R2 = (R_PRIOR_SHAPE + 210.0) / (R_PRIOR_RATE + 210.0)
-        self.assertAlmostEqual(s["ind_Lw"][t], (70.0 * R1 + 210.0 * R2) / 280.0, places=12)
+        # window sums: Σ I = 7 I_j, Σ Λ = 7 * 0.6 * I_j
+        R1 = (R_PRIOR_SHAPE + 70.0) / (R_PRIOR_RATE + 42.0)
+        R2 = (R_PRIOR_SHAPE + 210.0) / (R_PRIOR_RATE + 126.0)
+        self.assertAlmostEqual(s["ind_Lw"][t], (42.0 * R1 + 126.0 * R2) / 168.0, places=12)
         self.assertAlmostEqual(s["out_Lw"][t], (10.0 * 3.0 + 30.0 * 7.0) / 40.0, places=12)
         self.assertAlmostEqual(s["out_pw"][t], 5.0, places=12)
+        # the two locations must actually differ, or no weighting could be told
+        # apart from any other on this fixture
+        self.assertGreater(abs(R2 - R1), 1e-3)
+        self.assertNotAlmostEqual(s["ind_Lw"][t], s["ind_am"][t], places=6)
 
 
 class TestSpectralHelpers(unittest.TestCase):
@@ -1918,7 +2386,7 @@ class TestSpectralHelpers(unittest.TestCase):
         return mats
 
     def test_condition_number_matches_scipy(self):
-        """F19: κ = ||v|| ||v*|| / |vᵀv*| (Eq 38), independent of eigenvector scaling."""
+        """κ = ||v|| ||v*|| / |vᵀv*| (Eq 38), independent of eigenvector scaling."""
         import scipy.linalg
         for R in self._positive_matrices():
             w, vl, vr = scipy.linalg.eig(R, left=True, right=True)
@@ -1936,7 +2404,7 @@ class TestSpectralHelpers(unittest.TestCase):
                 sensitivity_elasticity(R)
 
     def test_infector_and_infectee_elasticities_coincide(self):
-        """F05 / V11: Σ_j ε^{kj} and Σ_k ε^{kj} are the same vector for any matrix."""
+        """Σ_j ε^{kj} and Σ_k ε^{kj} are the same vector for any matrix."""
         for R in self._positive_matrices():
             E = sensitivity_elasticity(R)["elasticity"]
             np.testing.assert_allclose(E.sum(axis=1), E.sum(axis=0), rtol=0, atol=1e-12)
@@ -1952,7 +2420,7 @@ class TestSpectralHelpers(unittest.TestCase):
 
 
 class TestScenarioDecisions(unittest.TestCase):
-    """D5 (calibration on base_f), D6 (closed population), D16 (Scenario C)."""
+    """Calibration on base_f, the closed population, and Scenario C."""
 
     @classmethod
     def setUpClass(cls):
@@ -2077,7 +2545,7 @@ class TestCoreHelpers(unittest.TestCase):
 
 
 class TestFigureFixes(unittest.TestCase):
-    """Plotting fixes of docs/FIX_PLAN.md Phases 4-5, checked on one small run."""
+    """Plotting invariants — labels, panels and statistics — on one small run."""
 
     @classmethod
     def setUpClass(cls):
@@ -2116,7 +2584,7 @@ class TestFigureFixes(unittest.TestCase):
         import matplotlib.pyplot as plt
         from unittest import mock
         from mobility_rt.error_tables import _period_masks, scored_crossing_day
-        from mobility_rt.plotting.figures_main import _plot_main_bias_3x3
+        from mobility_rt.plotting.figures_main import _plot_main_bias_grid
         table = compute_error_table([("One", self.sim, self.city)], self.p)
         for period in ("growth", "decline"):
             self.assertGreater(table[period]["n_days"]["One"], 0,
@@ -2125,7 +2593,7 @@ class TestFigureFixes(unittest.TestCase):
         masks = _period_masks(self.suite)
         with mock.patch.object(plt, "savefig"):
             for sch in SCHEMES:
-                stats = _plot_main_bias_3x3(all_data, sch.key, "unused.pdf")
+                stats = _plot_main_bias_grid(all_data, sch.key, "unused.pdf")
                 row = stats["a"]
                 for period in ("growth", "decline"):
                     mre, bias = row["scheme"][period]
@@ -2135,11 +2603,63 @@ class TestFigureFixes(unittest.TestCase):
                                            places=9, msg=(sch.key, period))
                     self.assertEqual(row["n_days"][period],
                                      table[period]["n_days"]["One"])
-                # D10: crossing lag on the scored days, against rho on day t
+                # crossing lag on the scored days, against rho on day t
                 c_s = scored_crossing_day(self.suite[sch.key], masks["full"])
                 c_r = scored_crossing_day(self.suite["rho_t"], masks["full"])
                 want = None if c_s is None or c_r is None else c_s - c_r
                 self.assertEqual(row["scheme"]["threshold_days"], want, sch.key)
+
+    def test_benchmark_column_changes_the_layout_and_nothing_else(self):
+        """Dropping the E(t) column must move no number: same statistics, one
+        column fewer, panel letters A-F instead of A-I."""
+        import matplotlib.pyplot as plt
+        from unittest import mock
+        from mobility_rt.plotting.figures_main import _plot_main_bias_grid
+        all_data = [(self.suite, "a"), (self.suite, "b"), (self.suite, "c")]
+        seen = {}
+        for flag in (True, False):
+            n_axes = []
+            with mock.patch.object(
+                    plt, "savefig",
+                    side_effect=lambda *a, **k: n_axes.append(len(plt.gcf().axes))):
+                seen[flag] = _plot_main_bias_grid(all_data, "ind_Rw", "unused.pdf",
+                                                  show_benchmark=flag)
+            self.assertEqual(n_axes, [9 if flag else 6], f"show_benchmark={flag}")
+        self.assertEqual(seen[True], seen[False])
+        # the suppressed column's statistics are still returned
+        for row in seen[False].values():
+            self.assertIn("E", row)
+            self.assertIsNotNone(row["E"]["growth"][0])
+
+    def test_si_suite_is_one_untargeted_figure_per_scheme(self):
+        """The SI set scores against R(t) only, with no E(t) benchmark column:
+        one figure per scheme, six panels, no "_vs_Et" file."""
+        import matplotlib.pyplot as plt
+        from unittest import mock
+        from mobility_rt.plotting.figures_main import plot_estimator_si_suite
+        all_data = [(self.suite, "a"), (self.suite, "b"), (self.suite, "c")]
+        n_axes = []
+        with mock.patch.object(
+                plt, "savefig",
+                side_effect=lambda *a, **k: n_axes.append(len(plt.gcf().axes))):
+            written = plot_estimator_si_suite(all_data, save_prefix="p")
+        self.assertEqual(sorted(written),
+                         sorted(f"p_naive_{sch.key}_vs_Rt.pdf" for sch in SCHEMES))
+        self.assertFalse([f for f in written if f.endswith("_vs_Et.pdf")])
+        self.assertEqual(n_axes, [6] * len(SCHEMES))
+
+    def test_bias_suite_writes_one_figure_per_scheme(self):
+        """SCHEMES is the single source of truth: a scheme added to the tables must
+        appear in the main-text set without anyone editing a second list."""
+        import matplotlib.pyplot as plt
+        from unittest import mock
+        from mobility_rt.plotting.figures_main import plot_main_bias_suite
+        all_data = [(self.suite, "a"), (self.suite, "b"), (self.suite, "c")]
+        with mock.patch.object(plt, "savefig"):
+            written = plot_main_bias_suite(all_data, save_prefix="p",
+                                           fname_suffix="sfx")
+        self.assertEqual(sorted(written),
+                         sorted(f"p_sfx_{sch.key}.pdf" for sch in SCHEMES))
 
     def test_no_literal_part_tilde_titles(self):
         import inspect
@@ -2167,7 +2687,7 @@ class TestFigureFixes(unittest.TestCase):
                                            trailing_mean(ser[:, j], 7)[x], rtol=1e-12)
 
     def test_fig3_K_keeps_undefined_T_j_as_nan(self):
-        """F10: undefined T_j reaches the tile and the surface as NaN, not 0."""
+        """Undefined T_j reaches the tile and the surface as NaN, not 0."""
         from unittest import mock
         import mobility_rt.plotting.figures_corrected as fc
         T_ser = np.array([type_reproduction_numbers(R) for R in self.sim["R_matrices"]])
@@ -2193,7 +2713,7 @@ class TestFigureFixes(unittest.TestCase):
                 self.assertEqual(recorded["K_masked"], int(np.isnan(T_ser).sum()))
 
     def test_surface_draws_every_location(self):
-        """F09: rows of the surface are locations, so none may be skipped."""
+        """Rows of the surface are locations, so none may be skipped."""
         import matplotlib.pyplot as plt
         import matplotlib.gridspec as gridspec
         from mobility_rt.plotting.figures_corrected import _plot_time_location_surface
@@ -2205,7 +2725,7 @@ class TestFigureFixes(unittest.TestCase):
         self.assertEqual(ax.collections[0].get_array().size, 9 * 91)
 
     def test_type_figures_mark_one_on_the_colorbar(self):
-        """F16: the dotted threshold line on each T colorbar is at 1, not norm(1)."""
+        """The dotted threshold line on each T colorbar is at 1, not norm(1)."""
         from mobility_rt.plotting.figures_main import plot_type_repro
         figs = self._capture(plot_type_repro, self.sim, self.sim, self.city, self.city,
                              "unused")
@@ -2226,6 +2746,438 @@ class TestFigureFixes(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Summary printer
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+#  Figures drawn from the three result tables
+# ---------------------------------------------------------------------------
+
+class TestTableFigures(unittest.TestCase):
+    """The three table figures must depict their tables and nothing else.
+
+    They are pure renderers: they take the dicts the table modules return, assert
+    the keys they need, and draw.  These tests pin that contract -- a missing
+    scheme, a missing scenario or an impossible quartile ordering must raise
+    rather than produce a figure that quietly disagrees with the table beside it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.labels = ["One", "Two", "Three"]
+        keys = [sch.key for sch in SCHEMES]
+        # deliberately spanning three decades, as the real tables do
+        cls.mre = {k: {l: 0.2 + 3.0 * i + 7.0 * j
+                       for j, l in enumerate(cls.labels)}
+                   for i, k in enumerate(keys)}
+        cls.bias = {k: {l: (-1.0) ** (i + j) * cls.mre[k][l] * 0.5
+                        for j, l in enumerate(cls.labels)}
+                    for i, k in enumerate(keys)}
+        cls.net = {"growth": {"labels": list(cls.labels),
+                              "n_days": {l: 100 + j for j, l in enumerate(cls.labels)},
+                              "mre": cls.mre, "bias": cls.bias}}
+        cls.diag = {l: {"rank_median": -0.2 + 0.3 * j, "rank_q1": -0.6 + 0.3 * j,
+                        "rank_q3": 0.4 + 0.2 * j, "cv_est": 2.0 + j,
+                        "cv_true": 6.0 + 12.0 * j, "agree_growth": 99.5 + 0.1 * j,
+                        "agree_own": 90.0 - 30.0 * j, "net_median": 2.0 + j,
+                        "n_days": 100 + j}
+                    for j, l in enumerate(cls.labels)}
+        rng = _np_for_fixture.random.default_rng(0)
+        cls.disc = {l: {c: {"mre": 2.0 + 8.0 * rng.random(7) + 5.0 * j,
+                            "bias": (-1.0) ** j * (1.0 + 9.0 * rng.random(7))}
+                        for c in ("own", "net")}
+                    for j, l in enumerate(cls.labels)}
+        for j, l in enumerate(cls.labels):
+            cls.disc[l]["n_days"] = 100 + j
+        cls.comb = {
+            "labels": list(cls.labels),
+            "network": {k: {l: (cls.mre[k][l], cls.bias[k][l]) for l in cls.labels}
+                        for k in keys},
+            "location": {key: {l: cls.diag[l].get(key, 5.0 + j)
+                               for j, l in enumerate(cls.labels)}
+                         for key, _s, _p, _t, _n in _LOCATION_ROWS},
+            "n_days": {l: 100 + j for j, l in enumerate(cls.labels)},
+        }
+
+    def _render(self, fn, *a, **kw):
+        with _tempfile.TemporaryDirectory() as d:
+            path = fn(*a, save_prefix=_os.path.join(d, "t"), **kw)
+            self.assertTrue(_os.path.exists(path) and _os.path.getsize(path) > 0)
+            return _os.path.basename(path)
+
+    def test_all_three_figures_render(self):
+        from mobility_rt.plotting.figures_tables import (
+            plot_estimator_error_figure, plot_location_diagnostics_figure,
+            plot_location_discrepancy_figure, plot_manuscript_figure)
+        self.assertEqual(self._render(plot_estimator_error_figure, self.net,
+                                      "growth"), "t_estimator_error_growth.pdf")
+        self.assertEqual(self._render(plot_location_diagnostics_figure, self.diag),
+                         "t_location_diagnostics.pdf")
+        self.assertEqual(self._render(plot_manuscript_figure, self.comb),
+                         "t_manuscript_table.pdf")
+        self.assertEqual(self._render(plot_location_discrepancy_figure, self.disc),
+                         "t_location_discrepancy.pdf")
+
+    def test_a_missing_scheme_or_scenario_is_fatal(self):
+        """A silently dropped row would make the figure contradict the table."""
+        import copy
+        from mobility_rt.plotting.figures_tables import (
+            plot_manuscript_figure, plot_estimator_error_figure)
+        bad = copy.deepcopy(self.net)
+        del bad["growth"]["mre"][SCHEMES[3].key]
+        with self.assertRaises(KeyError):
+            plot_estimator_error_figure(bad, "growth")
+        bad = copy.deepcopy(self.net)
+        del bad["growth"]["mre"][SCHEMES[3].key]["Two"]
+        with self.assertRaises(KeyError):
+            plot_estimator_error_figure(bad, "growth")
+        with self.assertRaises(KeyError):
+            plot_estimator_error_figure(self.net, "decline")
+        bad = copy.deepcopy(self.comb)
+        del bad["location"]["agree_own"]
+        with self.assertRaises(KeyError):
+            plot_manuscript_figure(bad)
+
+    def test_unordered_quartiles_are_fatal(self):
+        """q1 <= median <= q3 is what the interquartile bar draws; violate it and
+        the bar would be drawn upside down rather than flagged."""
+        import copy
+        from mobility_rt.plotting.figures_tables import \
+            plot_location_diagnostics_figure
+        bad = copy.deepcopy(self.diag)
+        bad["Two"]["rank_q1"] = bad["Two"]["rank_q3"] + 0.1
+        with self.assertRaises(ValueError):
+            plot_location_diagnostics_figure(bad)
+
+    def test_the_bold_cell_is_the_scheme_the_tex_table_bolds(self):
+        """Figure and .tex must name the SAME best scheme, ties included.
+
+        The previous version of this test compared a column minimum with itself,
+        which holds for every matrix and tested numpy rather than the code.  What
+        matters is that _matrix is oriented (scheme, scenario) and that the figure's
+        tie-break agrees with error_tables.write_error_tables: both take the first
+        minimum in SCHEMES order.  The tie below is between "ind_am" and "ind_Lw",
+        which sort one way by SCHEMES order and the other by ASCII, so a writer that
+        sorted the key strings would fail here.
+        """
+        import numpy as _np
+        from mobility_rt.plotting.figures_tables import _matrix
+        keys = [sch.key for sch in SCHEMES]
+        self.assertEqual(keys[1:3], ["ind_am", "ind_Lw"],
+                         "this test relies on the scheme order it names")
+        mre = {k: dict(v) for k, v in self.mre.items()}
+        mre[keys[1]][self.labels[0]] = mre[keys[2]][self.labels[0]] = 0.01
+        m = _matrix(mre, keys, self.labels)
+        self.assertEqual(m.shape, (len(keys), len(self.labels)),
+                         "_matrix must be (scheme, scenario)")
+        for i, k in enumerate(keys):            # orientation, not just shape
+            for j, lab in enumerate(self.labels):
+                self.assertAlmostEqual(m[i, j], mre[k][lab], places=12)
+
+        best = _np.zeros_like(m, dtype=bool)     # the figure's rule
+        best[m.argmin(axis=0), _np.arange(m.shape[1])] = True
+        self.assertTrue(_np.all(best.sum(axis=0) == 1), "one bold cell per scenario")
+        for j, lab in enumerate(self.labels):    # the .tex's rule
+            tex_best = min((mre[k][lab], i, k) for i, k in enumerate(keys))[2]
+            self.assertEqual(keys[int(_np.argmax(best[:, j]))], tex_best,
+                             f"{lab}: figure and .tex disagree on the best scheme")
+
+    def test_family_blocks_are_contiguous_runs(self):
+        """The block rules are drawn from these runs; a non-contiguous SCHEMES
+        order would put a rule in the wrong place instead of erroring."""
+        from mobility_rt.plotting.figures_tables import _blocks, _family
+        keys = [sch.key for sch in SCHEMES]
+        runs = _blocks(keys)
+        self.assertEqual([f for _, _, f in runs], ["agg", "ind", "out"])
+        self.assertEqual(runs[0][0], 0)
+        self.assertEqual(runs[-1][1], len(keys))
+        for lo, hi, fam in runs:
+            self.assertTrue(all(_family(k) == fam for k in keys[lo:hi]))
+
+    def test_the_log_colour_scale_brackets_the_data_in_whole_decades(self):
+        import numpy as _np
+        from mobility_rt.plotting.figures_tables import _decade_limits
+        vmin, vmax = _decade_limits(_np.array([[0.13, 4.0, 48.27]]))
+        self.assertAlmostEqual(vmin, 0.1)
+        self.assertAlmostEqual(vmax, 100.0)
+        self.assertLess(vmin, 0.13)
+        self.assertGreater(vmax, 48.27)
+        with self.assertRaises(ValueError):
+            _decade_limits(_np.array([[0.0, -1.0]]))
+
+    def test_the_figures_depict_every_row_of_their_tables(self):
+        """A row added to a table but not to its figure would be silently lost."""
+        from mobility_rt.location_errors import _DIAG_ROWS, COMPARATORS
+        from mobility_rt.plotting.figures_tables import _DISC_COMPARATORS
+        self.assertEqual([k for k, _c, _l, _o in _DISC_COMPARATORS],
+                         [k for k, _p, _t in COMPARATORS])
+        from mobility_rt.plotting.figures_tables import (_COMBINED_LOC_KEYS,
+                                                         _DIAG_KEYS)
+        self.assertEqual(set(_DIAG_KEYS),
+                         {k for k, _p, _t in _DIAG_ROWS} | {"n_days"})
+        self.assertEqual(set(_COMBINED_LOC_KEYS),
+                         {k for k, _s, _p, _t, _n in _LOCATION_ROWS})
+
+    def test_impossible_values_raise_rather_than_draw(self):
+        """A log panel cannot show zero, agreement cannot exceed 100 per cent and
+        a rank correlation cannot leave [-1, 1]; each must be fatal."""
+        import copy
+        from mobility_rt.plotting.figures_tables import (
+            plot_location_diagnostics_figure, plot_manuscript_figure)
+        for key, value in (("cv_est", 0.0), ("agree_own", 101.0),
+                           ("rank_median", 1.4)):
+            bad = copy.deepcopy(self.diag)
+            bad["Two"][key] = value
+            if key == "rank_median":          # keep the quartile ordering valid
+                bad["Two"]["rank_q3"] = 1.5
+            with self.assertRaises(ValueError, msg=f"{key}={value} was accepted"):
+                plot_location_diagnostics_figure(bad)
+        bad = copy.deepcopy(self.comb)
+        bad["location"]["own"]["Two"] = -1.0
+        with self.assertRaises(ValueError):
+            plot_manuscript_figure(bad)
+
+    def test_a_log_tick_is_never_labelled_with_a_rounded_value(self):
+        """0.05 must not be labelled 0.1."""
+        import matplotlib.pyplot as _plt
+        from mobility_rt.plotting.figures_tables import _log_ticks
+        fig, ax = _plt.subplots()
+        try:
+            ax.set_yscale("log")
+            ax.set_ylim(0.04, 60)
+            _log_ticks(ax)
+            fig.canvas.draw()
+            texts = [t.get_text() for t in ax.get_yticklabels() if t.get_text()]
+            for label, tick in zip(texts, ax.get_yticks()):
+                self.assertAlmostEqual(float(label), tick, places=10)
+        finally:
+            _plt.close(fig)
+
+    def test_the_discrepancy_panels_draw_the_statistics_the_table_prints(self):
+        """The figure reduces the per-location arrays itself; it must reduce them
+        exactly as location_errors._ROWS does, or figure and table disagree."""
+        import matplotlib.pyplot as _plt
+        from mobility_rt.location_errors import _ROWS
+        from mobility_rt.plotting.figures_tables import (_DISC_COMPARATORS,
+                                                         _panel_discrepancy)
+        reduce = {k: fn for k, _p, _t, fn in _ROWS}
+        for metric in ("mre", "bias"):
+            fig, ax = _plt.subplots()
+            try:
+                _panel_discrepancy(ax, self.labels, self.disc, metric)
+                # three artists per (comparator, scenario): IQR bar, max, median
+                lines = [ln for ln in ax.get_lines()]
+                self.assertEqual(len(lines),
+                                 3 * len(_DISC_COMPARATORS) * len(self.labels))
+                k = 0
+                for ckey, _c, _l, _o in _DISC_COMPARATORS:
+                    for lab in self.labels:
+                        v = self.disc[lab][ckey][metric]
+                        bar, mx, med = lines[k], lines[k + 1], lines[k + 2]
+                        k += 3
+                        self.assertAlmostEqual(min(bar.get_ydata()),
+                                               reduce["q1"](v), places=12)
+                        self.assertAlmostEqual(max(bar.get_ydata()),
+                                               reduce["q3"](v), places=12)
+                        self.assertAlmostEqual(mx.get_ydata()[0],
+                                               reduce["max"](v), places=12)
+                        self.assertAlmostEqual(med.get_ydata()[0],
+                                               reduce["median"](v), places=12)
+            finally:
+                _plt.close(fig)
+
+    def test_no_table_figure_carries_a_title(self):
+        """These follow the main-text convention: panel letters and axis labels
+        only, everything else in the caption."""
+        import matplotlib.pyplot as _plt
+        from mobility_rt.plotting import figures_tables as _ft
+        src = open(_ft.__file__).read()
+        for banned in ("set_title(", "suptitle("):
+            self.assertNotIn(banned, src, f"{banned} is back in figures_tables")
+
+    def test_rendering_restores_the_caller_style(self):
+        """set_modern_style rewrites global rcParams; an rc_context must undo it."""
+        import matplotlib.pyplot as _plt
+        from mobility_rt.plotting.figures_tables import plot_estimator_error_figure
+        _plt.rcParams["font.size"] = 17.0
+        try:
+            self._render(plot_estimator_error_figure, self.net, "growth")
+            self.assertEqual(_plt.rcParams["font.size"], 17.0)
+        finally:
+            _plt.rcdefaults()
+
+
+# ---------------------------------------------------------------------------
+# The daily solver against a refined grid (the numbers in simulate_epidemic_pde's
+# docstring)
+# ---------------------------------------------------------------------------
+
+class TestRefinedGridLimit(unittest.TestCase):
+    """Δt = Δa_E = 1 d against a Δt = Δa_E = 1/m d reference, Scenario A geometry.
+
+    The reference is an INDEPENDENT solver written here, not the module's: it steps
+    the same age-structured renewal PDE on a finer grid, binning the continuous
+    Gamma(5.5, 1.8) profile at the refined step, so it shares no code path with
+    simulate_epidemic_pde beyond the calibration and the mobility kernel.  This
+    pins the accuracy claims in that function's docstring; without it they are
+    assertions no one can check.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mobility_rt.config import BETWEEN_FRACTION, DAY_VARIATION_SD
+        cls.params = COVID_PARAMS
+        cls.N, cls.T, cls.SEED = 10, 365, 42
+        city = generate_city(cls.N, scenario="lagos", seed=cls.SEED)
+        cls.pops = city[1]
+        cls.f, cls.base_f = generate_mobility(
+            cls.N, cls.T, cls.pops, city[2], city[4],
+            day_variation_sd=DAY_VARIATION_SD["A"], seed=cls.SEED)
+        cls.init = np.zeros(cls.N)
+        cls.init[0] = 10.0
+        cls.LW = cls.params["base_contact_rate"]
+        cls.LB = cls.LW * BETWEEN_FRACTION
+
+    def _refined(self, R0, m):
+        """Attack rate (%) and peak daily incidence at Δt = Δa_E = 1/m day."""
+        from mobility_rt.simulation import _calibrate
+        p, h = self.params, 1.0 / m
+        shape = (p["gen_time_mean"] / p["gen_time_sd"]) ** 2
+        scale = p["gen_time_sd"] ** 2 / p["gen_time_mean"]
+        n_age = int(p["max_gen_time"] * m)
+        p_h = np.diff(_gamma.cdf(np.arange(n_age + 1) * h, a=shape, scale=scale))
+        p_h = np.concatenate([[0.0], p_h])          # no transmission at age 0
+        lw, lb, _, _ = _calibrate(self.base_f, self.pops,
+                                  p["prob_transmission_peak"], p_h, R0,
+                                  self.LW, self.LB, None, None)
+        S = self.pops.astype(float).copy()
+        E = np.zeros((self.N, len(p_h)))
+        E[:, 0] = self.init
+        S -= self.init
+        daily = np.zeros((self.T, self.N))
+        daily[0] = self.init
+        for t in range(1, self.T):
+            base_K, _, _, _, _ = _kernel_base(self.f[min(t, len(self.f) - 1)],
+                                              self.pops, lw, lb, None)
+            for _ in range(m):
+                E[:, 1:] = E[:, :-1]
+                # φ is a per-DAY rate: p_h[i]*E[:, i] are counts, /h makes a rate
+                wE = p["prob_transmission_peak"] * (E[:, 1:] @ p_h[1:]) / h
+                phi = np.maximum((base_K * wE[:, None]).sum(axis=0), 0.0)
+                new = S * (-np.expm1(-phi * h))
+                S -= new
+                E[:, 0] = new
+                daily[t] += new
+        return (100.0 * daily.sum() / self.pops.sum(), daily.sum(axis=1).max())
+
+    def _daily(self, R0, update):
+        prof = discretise_gamma(self.params["gen_time_mean"],
+                                self.params["gen_time_sd"],
+                                self.params["max_gen_time"])
+        sim = simulate_epidemic_pde(
+            self.T, self.N, self.pops, self.f,
+            self.params["prob_transmission_peak"], prof,
+            self.params["max_gen_time"], R0, self.init, self.LW, self.LB,
+            f_calibration=self.base_f, update=update)
+        inc = sim["incidence"]
+        return (100.0 * inc.sum() / self.pops.sum(), inc.sum(axis=1).max())
+
+    def test_refined_grid_limit(self):
+        """The docstring's table: exponential tracks the refined limit, Euler does not."""
+        for R0, euler_attack_min, euler_peak_min in ((1.5, 0.4, 2.0), (3.0, 0.9, 6.0)):
+            ar_ref, pk_ref = self._refined(R0, 64)
+            ar_16, _ = self._refined(R0, 16)
+            self.assertLess(abs(ar_16 - ar_ref), 0.02,
+                            f"R0={R0}: refined grid is not itself converged")
+
+            ar_exp, pk_exp = self._daily(R0, "exponential")
+            self.assertLess(abs(ar_exp - ar_ref), 0.05,
+                            f"R0={R0}: exponential attack rate {ar_exp:.4f} is not "
+                            f"within 0.05 pp of the refined limit {ar_ref:.4f}")
+
+            ar_eul, pk_eul = self._daily(R0, "euler")
+            self.assertGreater(ar_eul - ar_ref, euler_attack_min,
+                               f"R0={R0}: Euler no longer overstates the attack rate "
+                               "as the docstring says")
+            self.assertGreater(100.0 * (pk_eul - pk_ref) / pk_ref, euler_peak_min,
+                               f"R0={R0}: Euler no longer overstates the peak")
+            # and the default is the accurate one
+            self.assertLess(abs(ar_exp - ar_ref), abs(ar_eul - ar_ref))
+
+
+# ---------------------------------------------------------------------------
+# The pipeline's own entry points, and the alternative solvers behind Fig SI4C
+# ---------------------------------------------------------------------------
+
+class TestPipelineWrappersAndAltSolvers(unittest.TestCase):
+    """run_all calls the build_* wrappers and Fig SI4C draws _simulate_heun/_rk4.
+
+    Both were reachable only through a full pipeline run, so a break in the verbose
+    printing or in either solver would have surfaced as a broken figure rather than
+    as a failing test.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        params = COVID_PARAMS
+        cls.N, cls.T = 6, 200
+        cls.gt = discretise_gamma(params["gen_time_mean"], params["gen_time_sd"],
+                                  params["max_gen_time"])
+        city = generate_city(cls.N, scenario="lagos", seed=11)
+        cls.city = city
+        cls.pops = city[1]
+        cls.f, cls.base_f = generate_mobility(cls.N, cls.T, cls.pops, city[2],
+                                              city[4], seed=11)
+        cls.init = np.zeros(cls.N)
+        cls.init[0] = 10.0
+        cls.LW = params["base_contact_rate"]
+        cls.LB = cls.LW * 0.30
+        cls.common = dict(prob_peak=params["prob_transmission_peak"],
+                          max_days=params["max_gen_time"],
+                          R0_target=params["R0_target"])
+        cls.sim = simulate_epidemic_pde(
+            cls.T, cls.N, cls.pops, cls.f, cls.common["prob_peak"], cls.gt,
+            cls.common["max_days"], cls.common["R0_target"], cls.init,
+            cls.LW, cls.LB, f_calibration=cls.base_f)
+        cls.scen = [("One", cls.sim, city), ("Two", cls.sim, city)]
+
+    def test_every_build_wrapper_runs_and_writes_its_files(self):
+        from mobility_rt.combined_table import build_combined_table
+        from mobility_rt.error_tables import build_estimator_error_tables
+        from mobility_rt.location_errors import (build_diagnostics_table,
+                                                 build_location_table)
+        with _tempfile.TemporaryDirectory() as d:
+            err, err_paths = build_estimator_error_tables(self.scen, self.gt, d,
+                                                          prefix="e")
+            loc, loc_paths = build_location_table(self.scen, self.gt, d, prefix="l")
+            dia, dia_paths = build_diagnostics_table(self.scen, self.gt, d, prefix="g")
+            comb, comb_paths = build_combined_table(self.scen, self.gt, d, prefix="m",
+                                                    net_table=err, loc_table=loc,
+                                                    diag_table=dia)
+            for paths in (err_paths, loc_paths, dia_paths, comb_paths):
+                for p in paths:
+                    self.assertTrue(_os.path.getsize(p) > 0, f"{p} is empty")
+            self.assertEqual(comb["labels"], ["One", "Two"])
+
+    def test_the_alternative_solvers_track_the_exponential_update(self):
+        """Heun and RK4 approximate the same within-day depletion as the default, so
+        they must land far closer to it than forward Euler does — the claim Fig SI4C's
+        docstring makes for panel C."""
+        from mobility_rt.simulation import _simulate_heun, _simulate_rk4
+        kw = dict(f_calibration=self.base_f)
+        ref = self.sim["incidence"].sum()
+        eul = simulate_epidemic_pde(
+            self.T, self.N, self.pops, self.f, self.common["prob_peak"], self.gt,
+            self.common["max_days"], self.common["R0_target"], self.init,
+            self.LW, self.LB, update="euler", **kw)["incidence"].sum()
+        d_eul = abs(eul - ref) / ref
+        for name, fn in (("heun", _simulate_heun), ("rk4", _simulate_rk4)):
+            got = fn(self.T, self.N, self.pops, self.f, self.common["prob_peak"],
+                     self.gt, self.common["max_days"], self.common["R0_target"],
+                     self.init, self.LW, self.LB, **kw)["incidence"].sum()
+            self.assertTrue(np.isfinite(got) and got > 0, f"{name} produced nothing")
+            self.assertLess(abs(got - ref) / ref, d_eul,
+                            f"{name} is no closer to the exponential update than "
+                            "forward Euler is")
+
 
 def run_with_summary():
     import sys
