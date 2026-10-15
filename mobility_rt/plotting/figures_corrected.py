@@ -26,6 +26,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 import matplotlib.patheffects as pe
 from matplotlib.ticker import FormatStrFormatter, FuncFormatter, LogLocator, MaxNLocator, ScalarFormatter
+from scipy.stats import spearmanr
 
 import mobility_rt as dt
 from mobility_rt.config import DOW_SCALE
@@ -80,7 +81,9 @@ def set_modern_style():
     )
 
 
-def panel_label(ax, letter: str, x=-0.12, y=1.02):
+def panel_label(ax, letter: str, x=-0.12, y=1.04):
+    """Bold panel letter just above the top-left corner of the axes, clear of the
+    top tick label (the letter's baseline sits above the axes frame)."""
     ax.text(
         x,
         y,
@@ -88,7 +91,7 @@ def panel_label(ax, letter: str, x=-0.12, y=1.02):
         transform=ax.transAxes,
         fontsize=11,
         fontweight="700",
-        va="top",
+        va="bottom",
         ha="left",
         color="#111111",
         path_effects=[pe.withStroke(linewidth=2.5, foreground="white")],
@@ -122,21 +125,30 @@ def home_mobility_series(f_jk: np.ndarray) -> np.ndarray:
     return np.array([[float(f_jk[t, j, j]) for j in range(N)] for t in range(T)])
 
 
-def infector_infectee_elasticity_series(R_mats: np.ndarray):
-    """Returns (T,N) ε^k_out = Σ_j ε^{kj} (Eq 34) and (T,N) ε^j_in = Σ_k ε^{kj} (Eq 35).
+def location_elasticity_series(R_mats: np.ndarray):
+    """Location elasticity ε^j(t) and the within-location share of total elasticity.
 
-    The two are the same vector for every matrix: both equal v_i v*_i / (vᵀv*), because
-    R v = ℛ v and v*ᵀ R = ℛ v*ᵀ.  Both are returned so that Figs 2 and 3
-    can show that they coincide.
+    Returns (eps_loc, within_share):
+      eps_loc[t, j]    ε^j(t) = Σ_k ε^{jk}(t) = Σ_k ε^{kj}(t) = v_j v*_j / (vᵀv*)
+      within_share[t]  Σ_j ε^{jj}(t), the share of the total elasticity (which sums to
+                       one) carried by within-location corridors k = j
+
+    The infector sum ε^j_out and the infectee sum ε^j_in are the same vector for every
+    matrix (R v = ℛ v and v*ᵀ R = ℛ v*ᵀ), so they are drawn once, as ε^j.  The
+    identity is checked here rather than shown in a figure.
     """
     T, N, _ = R_mats.shape
-    inf_k = np.zeros((T, N))
-    inf_j = np.zeros((T, N))
+    eps_loc = np.zeros((T, N))
+    within_share = np.zeros(T)
     for t in range(T):
         Em = dt.sensitivity_elasticity(R_mats[t])["elasticity"]
-        inf_k[t] = Em.sum(axis=1)
-        inf_j[t] = Em.sum(axis=0)
-    return inf_k, inf_j
+        eps_out, eps_in = Em.sum(axis=1), Em.sum(axis=0)
+        if not np.allclose(eps_out, eps_in, rtol=0.0, atol=1e-9):
+            raise AssertionError(f"day {t}: infector and infectee elasticities differ "
+                                 f"(max |diff| {np.abs(eps_out - eps_in).max():.2e})")
+        eps_loc[t] = eps_out
+        within_share[t] = float(np.trace(Em))
+    return eps_loc, within_share
 
 
 def eigenvector_timeseries(R_mats: np.ndarray):
@@ -379,6 +391,106 @@ def _plot_time_location_surface(
     return ax
 
 
+# ── elasticity panels (Fig 2 I, Fig 3 D) ─────────────────────────────────────
+
+COL_WITHIN = OK[2]    # bluish green: within-location corridors (k = j)
+COL_BETWEEN = OK[0]   # orange: between-location corridors (k ≠ j)
+
+
+def _plot_elasticity_share(ax, within_share: np.ndarray, *, peak_day: int):
+    """Stacked shares of the total elasticity: within-location corridors Σ_j ε^{jj}(t)
+    at the bottom, between-location corridors 1 − Σ_j ε^{jj}(t) above.  Each day's
+    elasticities sum to one, so the two areas fill the unit band exactly."""
+    t = np.arange(len(within_share))
+    w = np.clip(np.asarray(within_share, dtype=float), 0.0, 1.0)
+    ax.fill_between(t, 0.0, w, color=COL_WITHIN, alpha=0.55, lw=0,
+                    label=r"Within-location ($k=j$)")
+    ax.fill_between(t, w, 1.0, color=COL_BETWEEN, alpha=0.40, lw=0,
+                    label=r"Between-location ($k\neq j$)")
+    ax.plot(t, w, color=COL_WITHIN, lw=1.1)
+    ax.axvline(peak_day, color="#555", ls="--", lw=0.85, label="Incidence peak")
+    ax.set_xlim(0, len(w) - 1)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("Day $t$")
+    ax.set_ylabel("Share of total elasticity")
+    ax.legend(fontsize=7, loc="lower right", frameon=True, facecolor="white",
+              framealpha=0.9, edgecolor="0.8", borderpad=0.4, handlelength=1.4)
+    ax.grid(False)
+
+
+def _label_points(ax, x, y, labels, *, fontsize=7, box=(0.075, 0.05), gap=0.014):
+    """Label scatter points without overlap.
+
+    Each label first tries four positions next to its point (right-above,
+    right-below, left-above, left-below).  If none is free, as happens when many
+    points crowd together, it is stacked at the first free level above (then below)
+    the point and joined to it by a thin leader line.  A position is free when its
+    box stays inside the axes and clears every other point, every label already
+    placed and the correlation note in the top-right corner.  Works in axes-fraction
+    units, so the axis limits must be set before calling."""
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    fx = (np.asarray(x, float) - x0) / (x1 - x0)
+    fy = (np.asarray(y, float) - y0) / (y1 - y0)
+    w, h = box
+    r = 0.018                                    # clearance around a marker
+    placed = [(0.62, 0.90, 1.0, 1.0)]            # reserved: the correlation note
+
+    def clear(b, j):
+        bx0, by0, bx1, by1 = b
+        if bx0 < 0 or by0 < 0 or bx1 > 1 or by1 > 1:
+            return False
+        if any(not (bx1 <= c0 or bx0 >= c2 or by1 <= c1 or by0 >= c3)
+               for c0, c1, c2, c3 in placed):
+            return False
+        return not any(bx0 - r < fx[k] < bx1 + r and by0 - r < fy[k] < by1 + r
+                       for k in range(len(fx)) if k != j)
+
+    # top points first, then left to right, so stacked labels keep the points' order
+    for j in np.lexsort((fx, -fy)):
+        px, py = fx[j], fy[j]
+        near = [(px + gap, py + 0.6 * gap), (px + gap, py - 0.6 * gap - h),
+                (px - gap - w, py + 0.6 * gap), (px - gap - w, py - 0.6 * gap - h)]
+        step = h + 0.01
+        stacked = ([(px - w / 2, py + 2 * gap + k * step) for k in range(1, 14)]
+                   + [(px - w / 2, py - 2 * gap - h - k * step) for k in range(1, 14)])
+        choice = next(((cx, cy, False) for cx, cy in near
+                       if clear((cx, cy, cx + w, cy + h), j)), None)
+        if choice is None:
+            choice = next(((cx, cy, True) for cx, cy in stacked
+                           if clear((cx, cy, cx + w, cy + h), j)),
+                          (near[0][0], near[0][1], False))
+        cx, cy, leader = choice
+        placed.append((cx, cy, cx + w, cy + h))
+        ax.text(cx + (w / 2 if leader else 0.0), cy, labels[j], transform=ax.transAxes,
+                fontsize=fontsize, color="#222", ha="center" if leader else "left",
+                va="bottom")
+        if leader:
+            end_y = cy if cy > py else cy + h
+            ax.plot([px, cx + w / 2], [py, end_y], transform=ax.transAxes,
+                    color="0.6", lw=0.5, zorder=2)
+
+
+def _plot_elasticity_vs_Rout(ax, mean_Rout: np.ndarray, mean_eps: np.ndarray):
+    """Each location's time-averaged location elasticity ε^j against its
+    time-averaged outward reproduction number R^j_out, with the Spearman rank
+    correlation between the two across locations."""
+    N = len(mean_eps)
+    ax.scatter(mean_Rout, mean_eps, s=46, color=OK[4], edgecolors="white",
+               linewidths=0.8, zorder=3)
+    rho_s = float(spearmanr(mean_Rout, mean_eps).statistic)   # average ranks for ties
+    ax.text(0.97, 0.97, rf"Spearman $\rho_s = {rho_s:+.2f}$", transform=ax.transAxes,
+            fontsize=7, ha="right", va="top", color="#333")
+    xpad = 0.08 * (mean_Rout.max() - mean_Rout.min() + 1e-12)
+    ax.set_xlim(mean_Rout.min() - xpad, mean_Rout.max() + 2 * xpad)
+    ax.set_ylim(0.0, mean_eps.max() * 1.18)
+    _label_points(ax, mean_Rout, mean_eps, [f"L{j + 1}" for j in range(N)])
+    ax.set_xlabel(r"Time-averaged $R^j_{\mathrm{out}}$")
+    ax.set_ylabel(r"Time-averaged $\varepsilon^j$")
+    ax.grid(False)
+    return rho_s
+
+
 # ── Figure 2 (3 × 3) ────────────────────────────────────────────────────────
 
 
@@ -406,7 +518,7 @@ def plot_fig02_overview(
     )
     prev_act = activity_location_prevalence(f_jk, E_pde)
     R_sys = np.array([dt.R_system(R_mats[t]) for t in range(T)])
-    eps_out, eps_in = infector_infectee_elasticity_series(R_mats)
+    eps_loc, within_share = location_elasticity_series(R_mats)
     f_mean = f_jk.mean(axis=0)
     f_diag = home_mobility_series(f_jk)
 
@@ -523,39 +635,27 @@ def plot_fig02_overview(
     ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="upper right")
     panel_label(ax, "G")
 
-    # H — infector elasticity ε^k_out(t) (always tile)
-    vmax_e = np.percentile(eps_out[eps_out > 0], 97) if (eps_out > 0).any() else 1.0
+    # H — location elasticity ε^j(t) (always tile)
+    vmax_e = np.percentile(eps_loc[eps_loc > 0], 97) if (eps_loc > 0).any() else 1.0
     ax = fig.add_subplot(gs[2, 1])
     _plot_time_location_tile(
         ax,
-        eps_out,
+        eps_loc,
         T,
         N,
-        cbar_title=r"$\varepsilon^k_{\mathrm{out}}(t)$",
+        cbar_title=r"$\varepsilon^j(t)$",
         letter="H",
         cmap="YlOrRd",
-        y_label=r"Infector $k$",
+        y_label=r"Location $j$",
         vmin=0,
         vmax=vmax_e,
     )
 
-    # I — infectee elasticity ε^j_in(t) (always tile).  Identical to H for every
-    # matrix (Eqs 34-35); drawn on the same colour scale and labelled so.
+    # I — share of the total elasticity in within-location corridors (k = j) and in
+    # between-location corridors (k ≠ j); the two add up to one on every day
     ax = fig.add_subplot(gs[2, 2])
-    _plot_time_location_tile(
-        ax,
-        eps_in,
-        T,
-        N,
-        cbar_title=r"$\varepsilon^j_{\mathrm{in}}(t)$",
-        letter="I",
-        cmap="YlOrRd",
-        y_label=r"Infectee $j$",
-        vmin=0,
-        vmax=vmax_e,
-    )
-    ax.set_title(r"Identical to H: $\varepsilon^i_{\mathrm{in}}=\varepsilon^i_{\mathrm{out}}$ (Eqs 34–35)",
-                 fontsize=7, pad=4)
+    _plot_elasticity_share(ax, within_share, peak_day=int(inc.sum(axis=1).argmax()))
+    panel_label(ax, "I")
     os.makedirs(os.path.dirname(save_prefix) or ".", exist_ok=True)
     path = f"{save_prefix}_02_overview{sfx}.pdf"
     plt.savefig(path, dpi=300, bbox_inches="tight")
@@ -595,9 +695,9 @@ def plot_fig03_taxonomy(
     days = np.arange(len(gen_time_pmf))
     g_univ = renewal_gt(gen_time_pmf)   # p/Σ_{a≥1} p, the shape every GT reduces to
 
-    eps_out, eps_in = infector_infectee_elasticity_series(R_mats)
-    mean_eps_out = np.nanmean(eps_out, axis=0)
-    mean_eps_in = np.nanmean(eps_in, axis=0)
+    eps_loc, _ = location_elasticity_series(R_mats)
+    mean_eps = np.nanmean(eps_loc, axis=0)
+    mean_Rout = np.nanmean(R_out_s, axis=0)
     v_t, vstar_t = eigenvector_timeseries(R_mats)
 
     # T_j(t); NaN where undefined (ρ(R_JJ) >= 1), and kept NaN when drawn
@@ -690,26 +790,10 @@ def plot_fig03_taxonomy(
             vmax=vmax_i,
         )
 
-    # D — time-mean elasticity marginals.  ε_out and ε_in are the same vector for
-    # every matrix (Eqs 34-35), so every point lies on the diagonal.
+    # D — where control matters (time-averaged location elasticity ε^j) against
+    # where residents transmit most (time-averaged R^j_out)
     ax = fig.add_subplot(gs[0, 3])
-    ax.scatter(mean_eps_out, mean_eps_in, s=55, c=np.arange(N), cmap="tab10", edgecolors="#222", linewidths=0.5)
-    for j in range(N):
-        ax.annotate(
-            f"L{j+1}",
-            (mean_eps_out[j], mean_eps_in[j]),
-            textcoords="offset points",
-            xytext=(4, 3),
-            fontsize=7,
-            color="#222",
-        )
-    mx = max(mean_eps_out.max(), mean_eps_in.max(), 1e-9)
-    ax.plot([0, mx], [0, mx], color="#999", ls="--", lw=0.85, label="equal marginals")
-    ax.set_xlabel(r"time-mean $\varepsilon^k_{\mathrm{out}}$")
-    ax.set_ylabel(r"time-mean $\varepsilon^j_{\mathrm{in}}$")
-    ax.text(0.03, 0.97, "Identical by construction\n(Eqs 34–35): every point\nlies on the diagonal",
-            transform=ax.transAxes, fontsize=6.5, va="top", ha="left", color="#444")
-    ax.legend(fontsize=6.5, loc="lower right")
+    _plot_elasticity_vs_Rout(ax, mean_Rout, mean_eps)
     panel_label(ax, "D")
 
     # E — left eigenvector v_j (always tile)
@@ -790,15 +874,15 @@ def plot_fig03_taxonomy(
         ax.set_ylabel(r"$R$")
         panel_label(ax, letter)
 
-    # K — type reproduction numbers T_j(t); grey where undefined.  T_j diverges as
+    # K — type reproduction numbers T_j(t); grey (tile) or not drawn (surface) where
+    # undefined, as the caption states.  T_j diverges as
     # ρ(R_JJ) → 1, so the colour range is taken from the 2nd-98th percentiles of the
     # defined values, as for panels B, C and L.
-    undefined_txt = r"grey: $T_j$ undefined ($\rho(\mathbf{R}_{JJ})\geq 1$)"
     T_finite = T_ser[np.isfinite(T_ser)]
     vmin_T, vmax_T = ((float(np.percentile(T_finite, 2)), float(np.percentile(T_finite, 98)))
                       if T_finite.size else (0.0, 1.0))
     if surface_3d:
-        ax_k = _plot_time_location_surface(
+        _plot_time_location_surface(
             fig,
             gs[2, 2],
             T_ser,
@@ -811,8 +895,6 @@ def plot_fig03_taxonomy(
             vmin=vmin_T,
             vmax=vmax_T,
         )
-        ax_k.set_title(r"$T_j$ undefined ($\rho(\mathbf{R}_{JJ})\geq 1$): not drawn",
-                       fontsize=7, pad=2)
     else:
         ax = fig.add_subplot(gs[2, 2])
         _plot_time_location_tile(
@@ -827,7 +909,6 @@ def plot_fig03_taxonomy(
             vmin=vmin_T,
             vmax=vmax_T,
         )
-        ax.set_title(undefined_txt, fontsize=7, pad=4)
 
     # L — R^l_meeting(t)
     posm = R_meet_s[R_meet_s > 0]
@@ -928,7 +1009,8 @@ def plot_fig04_spectral(sim: dict, save_prefix: str, *, show_dow: bool = True):
     ax.set_ylim(0, 1.05)
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="upper left")
+    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="lower left", frameon=True,
+              facecolor="white", framealpha=0.9, edgecolor="0.8", borderpad=0.4)
     panel_label(ax, "A")
 
     ax = fig.add_subplot(gs[0, 4:7])
@@ -977,7 +1059,6 @@ def plot_fig04_spectral(sim: dict, save_prefix: str, *, show_dow: bool = True):
     ax.axhline(1.0, color="#888", ls="--", lw=0.75)
     ax.set_xlabel("$n$ (generations)")
     ax.set_ylabel(r"Envelope$/\mathcal{R}^n$")
-    ax.set_title(r"Amplification envelopes", fontsize=7, pad=3)
     ax.legend(fontsize=5.5, borderpad=0.3, labelspacing=0.10, ncol=2,
               loc="upper right")
     panel_label(ax, "C")

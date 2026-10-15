@@ -62,7 +62,6 @@ def plot_fig5(sim_A, sim_B, f_B, save_prefix="fig"):
     ax.set_xlabel("Activity location $k$"); ax.set_ylabel("Residence $j$")
     cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cb.ax.set_title("$\\bar{f}_{jk}$\n(log)", fontsize=6, pad=3)
-    ax.set_title("Mean mobility (log scale)", fontsize=6, pad=3)
     _panel_label(ax, "A")
 
     # ── B: 3D E_kj at peak — Scenario B ───────────────────────────────────
@@ -123,7 +122,6 @@ def plot_fig5(sim_A, sim_B, f_B, save_prefix="fig"):
     ax.set_ylim(0, 1)
     ax.set_xlabel("Day $t$")
     ax.set_ylabel(r"Overall $\bar{\pi}(t) = \sum_j E_{jj}/\sum_{k,j} E_{kj}$")
-    ax.set_title(r"Within-fraction $\bar{\pi}(t)$: local vs imported", fontsize=6.5, pad=3)
     ax.legend(fontsize=6, borderpad=0.3)
     _panel_label(ax, "F")
 
@@ -275,8 +273,10 @@ def _plot_main_bias_grid(all_data, est_key, fname, target="rho_t",
     n_cols  = 3 if show_benchmark else 2
     panel_w = (FIG_W_3COL - MARGIN_L - MARGIN_R) / (3 + 2 * WSPACE)
     fig_w   = MARGIN_L + panel_w * (n_cols + (n_cols - 1) * WSPACE) + MARGIN_R
-    fig = plt.figure(figsize=(fig_w, 7.8))
-    gs  = gridspec.GridSpec(3, n_cols, hspace=0.95, wspace=WSPACE,
+    # No panel titles, so the rows need only clear the x labels and panel letters;
+    # the figure is shortened to keep each panel the size it was with titles.
+    fig = plt.figure(figsize=(fig_w, 6.3))
+    gs  = gridspec.GridSpec(3, n_cols, hspace=0.45, wspace=WSPACE,
                             left=MARGIN_L / fig_w, right=1.0 - MARGIN_R / fig_w,
                             top=0.95, bottom=0.06)
 
@@ -335,12 +335,10 @@ def _plot_main_bias_grid(all_data, est_key, fname, target="rho_t",
         ax.axvline(peak_t, color="0.55", ls="--", lw=0.7, alpha=0.45, zorder=1)
         ax.set_xlabel("Day $t$", fontsize=7)
         ax.set_ylabel("Reproduction number", fontsize=7)
-        ax.set_title(f"{sc_label}\nEstimator vs ${tgt_tex}$",
-                     fontsize=6.5, pad=3, color=sc_col, fontweight="bold")
         ax.legend(fontsize=4.8, borderpad=0.3, labelspacing=0.10,
                   loc="upper right", ncol=1)
         ax.tick_params(labelsize=6)
-        _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
+        _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.03); panel_idx += 1
 
         def _bias_panel(ax_b, diff, st, ylabel, title_suffix):
             ax_b.fill_between(t_arr, 0, 1, where=growth_band, step="mid",
@@ -379,15 +377,13 @@ def _plot_main_bias_grid(all_data, est_key, fname, target="rho_t",
                             loc="lower right")
             ax_b.set_xlabel("Day $t$", fontsize=7)
             ax_b.set_ylabel(ylabel, fontsize=7)
-            ax_b.set_title(f"{sc_label}\n{title_suffix}",
-                           fontsize=6.5, pad=3, color=sc_col, fontweight="bold")
             ax_b.tick_params(labelsize=6)
 
         # ── Col 1: the scheme against its matched reference ─────────────────
         ax = fig.add_subplot(gs[row, 1])
         _bias_panel(ax, diff_est, row_stats["scheme"],
                     f"${est_tex} - {ref_tex}$", f"Bias — ${est_tex}$")
-        _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
+        _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.03); panel_idx += 1
 
         # ── Col 2: E(t) against ℛ(t) ────────────────────────────────────────
         if show_benchmark:
@@ -395,7 +391,7 @@ def _plot_main_bias_grid(all_data, est_key, fname, target="rho_t",
             _bias_panel(ax, diff_E, row_stats["E"],
                         r"$\mathcal{E}(t) - \mathcal{R}(t)$",
                         r"Bias — $\mathcal{E}(t)$ vs $\mathcal{R}(t)$")
-            _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.26); panel_idx += 1
+            _panel_label(ax, PANEL_IDS[panel_idx], x=-0.17, y=1.03); panel_idx += 1
 
     plt.savefig(fname, dpi=300, bbox_inches="tight")
     plt.close()
@@ -643,7 +639,6 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
         ax.set_yticks(np.arange(N))
         ax.set_yticklabels(labs, fontsize=7.5)
         ax.set_xlabel("Day", fontsize=9)
-        ax.set_title(title, fontsize=10, pad=6)
 
         handles = [
             Line2D([0], [0], color="#111111", lw=1.4, ls="--",
@@ -685,15 +680,11 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
 
         ax.set_xlabel("Day", fontsize=9)
         ax.set_ylabel("$R_{jj}(t)$", fontsize=9)
-        ax.set_title(title, fontsize=9, pad=5)
         ax.set_ylim(bottom=0)
         ax.legend(fontsize=6.5, ncol=2, loc="upper right",
                   framealpha=0.80, handlelength=1.2)
         _panel_label(ax, panel_lbl)
 
-    plt.suptitle(
-        r"Type reproduction numbers $R^j_{\rm type}(t)$ and within-location drivers $R_{jj}(t)$",
-        fontsize=11, y=1.01)
     fname1 = f"{save_prefix}_type_heatmaps.png"
     plt.savefig(fname1, dpi=300, bbox_inches="tight")
     plt.close()
@@ -730,7 +721,6 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
         ax1.set_zlabel("$R^j_{\\rm type}(t)$", fontsize=7, labelpad=3)
         ax1.set_yticks(np.arange(N))
         ax1.set_yticklabels([f"L{idx[j]+1}" for j in range(N)], fontsize=5.5)
-        ax1.set_title(f"{title_scen}: $R^j_{{\\rm type}}(t)$", fontsize=9, pad=6)
         ax1.view_init(elev=26, azim=-52)
         ax1.tick_params(labelsize=6)
         cb1 = fig.colorbar(surf1, ax=ax1, fraction=0.022, pad=0.08, shrink=0.60)
@@ -750,16 +740,12 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
         ax2.set_zlabel("$R_{jj}(t)$", fontsize=7, labelpad=3)
         ax2.set_yticks(np.arange(N))
         ax2.set_yticklabels([f"L{idx[j]+1}" for j in range(N)], fontsize=5.5)
-        ax2.set_title(f"{title_scen}: $R_{{jj}}(t)$", fontsize=9, pad=6)
         ax2.view_init(elev=26, azim=-52)
         ax2.tick_params(labelsize=6)
         cb2 = fig.colorbar(surf2, ax=ax2, fraction=0.022, pad=0.08, shrink=0.60)
         cb2.set_label("$R_{jj}(t)$", fontsize=7)
         _panel_label_3d(ax2, next(panel_it))
 
-    plt.suptitle(
-        r"3-D view: $R^j_{\rm type}(t)$ (controllability) and $R_{jj}(t)$ (self-sustaining transmission)",
-        fontsize=11, y=1.01)
     fname2 = f"{save_prefix}_type_surfaces.png"
     plt.savefig(fname2, dpi=300, bbox_inches="tight")
     plt.close()
@@ -797,15 +783,17 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
                    label="$R^{\\mathcal{P}}_{\\rm type}=1$", zorder=4)
         ax.axvline(1.0, color="#333333", lw=1.0, ls=":", alpha=0.8,
                    label="$\\rho=1$", zorder=4)
-        ax.text(0.97, 0.97,
+        # Scenario B's curves run up to the top-right corner, so its note goes in the
+        # empty bottom-right instead
+        note_y, note_va = (0.03, "bottom") if panel_lbl == "b" else (0.97, "top")
+        ax.text(0.97, note_y,
                 r"Dots: first day $R^{\mathcal{P}}_{\rm type}$ is defined ($\rho(R_{QQ})<1$)",
-                transform=ax.transAxes, fontsize=6, va="top", ha="right",
+                transform=ax.transAxes, fontsize=6, va=note_va, ha="right",
                 color="#444444", style="italic",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="0.96",
                           edgecolor="0.65", linewidth=0.5))
         ax.set_xlabel(r"$\rho\!\left(\mathbf{R}(t)\right)$", fontsize=9)
         ax.set_ylabel(r"$R^{\mathcal{P}}_{\rm type}(t)$", fontsize=9)
-        ax.set_title(title, fontsize=9.5, pad=5)
         ax.set_xlim(0, None)
         ax.set_ylim(0, None)
         ax.legend(fontsize=6.5, loc="upper left", framealpha=0.80,
@@ -844,7 +832,6 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
                           edgecolor="0.68", linewidth=0.5))
         ax.set_xlabel("Day", fontsize=9)
         ax.set_ylabel("$R_{jj}(t)$  (mean ± range by type)", fontsize=8.5)
-        ax.set_title(title, fontsize=9.5, pad=5)
         ax.set_ylim(bottom=0)
         ax.legend(fontsize=7, loc="upper right", framealpha=0.80,
                   handlelength=1.2)
@@ -883,9 +870,6 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
 
         ax.set_xlabel(r"$\rho\!\left(\mathbf{R}(t)\right)$", fontsize=9)
         ax.set_ylabel("$R^j_{\\rm type}(t)$", fontsize=9)
-        ax.set_title(
-            f"Threshold property $R^j_{{\\rm type}}>1 \\Leftrightarrow \\rho>1$ — {scen_lbl}",
-            fontsize=9, pad=5)
         ax.legend(fontsize=7.5, loc="lower right", framealpha=0.80,
                   handlelength=1.2)
         cb = fig.colorbar(
@@ -926,7 +910,6 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
         ax.set_yticklabels([t.replace("-", NB_HYPHEN).title()
                             for t in t_order], fontsize=7)
         ax.set_xlabel("Day $t$", fontsize=9)
-        ax.set_title(title, fontsize=9, pad=5)
         cb_t = fig.colorbar(im, ax=ax, fraction=0.032, pad=0.03, extend="max")
         cb_t.set_label(r"$R^{\mathcal{P}}_{\rm type}(t)$", fontsize=7.5)
         cb_t.ax.axhline(1.0, color="#333", lw=0.8, ls=":")   # data units
@@ -940,10 +923,6 @@ def plot_type_repro(sim_A, sim_B, city_A, city_B, save_prefix):
                   framealpha=0.80, handlelength=1.2)
         _panel_label(ax, panel_lbl)
 
-    plt.suptitle(
-        r"Group $R^{\mathcal{P}}_{\rm type}$ vs $\rho(t)$, within-location drivers $R_{jj}(t)$, "
-        r"and the threshold property",
-        fontsize=11, y=1.005)
     fname3 = f"{save_prefix}_type_groups.png"
     plt.savefig(fname3, dpi=300, bbox_inches="tight")
     plt.close()
@@ -1003,7 +982,6 @@ def plot_fig_C_transience(sim_C, city_data, f_C, save_prefix="fig"):
     ax.set_yticks(range(N)); ax.set_yticklabels(loc_lbl, fontsize=4.5)
     ax.set_xlabel("Activity location $k$", fontsize=6)
     ax.set_ylabel("Residence $j$", fontsize=6)
-    ax.set_title("Hub-concentrated mobility\n$\\bar{f}_{jk}$ (off-diag range)", fontsize=6, pad=3)
     cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cb.ax.set_title("$\\bar{f}_{jk}$", fontsize=5.5, pad=2)
     cb.ax.tick_params(labelsize=5)
@@ -1020,7 +998,6 @@ def plot_fig_C_transience(sim_C, city_data, f_C, save_prefix="fig"):
     ax.set_yticks(range(N))
     ax.set_yticklabels(loc_lbl, fontsize=5)
     ax.set_xlabel("Resident population (millions)", fontsize=6)
-    ax.set_title("Resident population\nper location", fontsize=6, pad=3)
     ax.invert_yaxis()
     ax.tick_params(labelsize=5)
     ax.text(pops[i_hub] / 1e6 + 0.03, i_hub, "hub",
@@ -1039,7 +1016,6 @@ def plot_fig_C_transience(sim_C, city_data, f_C, save_prefix="fig"):
     ax.set_yticks(range(N)); ax.set_yticklabels(loc_lbl, fontsize=4.5)
     ax.set_xlabel("Infectee $j$", fontsize=6)
     ax.set_ylabel("Infector $k$", fontsize=6)
-    ax.set_title(f"$R_{{kj}}$ at epidemic peak (day {peak})", fontsize=6, pad=3)
     cb3 = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cb3.ax.set_title("$R_{kj}$", fontsize=5.5, pad=2)
     cb3.ax.tick_params(labelsize=5)
@@ -1152,9 +1128,6 @@ def plot_fig_C_transience(sim_C, city_data, f_C, save_prefix="fig"):
             transform=ax.get_xaxis_transform(), fontsize=5, color="0.4",
             ha="right", va="bottom")
 
-    ax.set_title("Transient amplification: $\\sigma(t) > 1$ while $\\mathcal{R}(t) < 1$\n"
-                 f"(hub-amplified scenario, near-star topology, $\\lambda_B/\\lambda_W = {lb_over_lw:.2f}$)",
-                 fontsize=6.5, pad=4)
     ax.legend(fontsize=5.2, borderpad=0.3, labelspacing=0.15,
               ncol=2, loc="upper center",
               bbox_to_anchor=(0.5, -0.12), framealpha=0.92)
@@ -1203,7 +1176,7 @@ def plot_lehmer_mean_spectrum(sim, scenario_label, save_prefix="fig"):
     fig = plt.figure(figsize=(7.2, 5.6))
     gs  = gridspec.GridSpec(
         2, 3, height_ratios=[1.15, 1],
-        hspace=0.62, wspace=0.52,
+        hspace=0.42, wspace=0.52,
         left=0.09, right=0.97, top=0.94, bottom=0.10)
 
     # ── A: heatmap X(α,t) ───────────────────────────────────────────────────
@@ -1229,10 +1202,6 @@ def plot_lehmer_mean_spectrum(sim, scenario_label, save_prefix="fig"):
                 fontsize=4, color=col, va="top")
     ax.set_xlabel("Day $t$", fontsize=7)
     ax.set_ylabel("Lehmer-mean exponent $\\alpha$", fontsize=6)
-    ax.set_title(
-        "$\\alpha{=}0$: arithmetic mean;  $\\alpha{=}1$: risk-averse $\\mathcal{E}(t)$ (dashed);  "
-        "$\\alpha{\\to}\\infty$: $\\mathcal{A}_1(1)$",
-        fontsize=5.5, pad=3)
     ax.tick_params(labelsize=5.5)
     _panel_label(ax, "A")
 
@@ -1251,7 +1220,6 @@ def plot_lehmer_mean_spectrum(sim, scenario_label, save_prefix="fig"):
     ax.axhline(1.0, color="0.55", ls="--", lw=0.7)
     ax.set_xlabel("$\\alpha$", fontsize=7)
     ax.set_ylabel("$X(\\alpha, t_*)$", fontsize=7)
-    ax.set_title("Spectrum at three\ntime points", fontsize=6, pad=3)
     ax.legend(fontsize=4.8, borderpad=0.3, labelspacing=0.12)
     ax.text(0.04, 0.14, "dot: $\\alpha{=}0$   square: $\\alpha{=}1$",
             transform=ax.transAxes, fontsize=4.5, color="0.4")
@@ -1288,15 +1256,11 @@ def plot_lehmer_mean_spectrum(sim, scenario_label, save_prefix="fig"):
             fontsize=4.5, color="0.4", va="top")
     ax.set_xlabel("Day $t$", fontsize=7)
     ax.set_ylabel("$X(\\alpha,t)$", fontsize=7)
-    ax.set_title("Lehmer-mean time series at selected $\\alpha$ values", fontsize=6, pad=3)
     ax.legend(fontsize=4.5, borderpad=0.3, labelspacing=0.10, ncol=4,
               loc="upper right")
     ax.tick_params(labelsize=5.5)
     _panel_label(ax, "C")
 
-    fig.suptitle(
-        f"Lehmer-mean reproduction-number spectrum $X(\\alpha,t)$ — {scenario_label}",
-        fontsize=7, y=1.0)
 
     fname = f"{save_prefix}_lehmer_mean_spectrum_{scenario_label.replace(' ', '_')}.pdf"
     plt.savefig(fname, dpi=300, bbox_inches="tight")

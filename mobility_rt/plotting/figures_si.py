@@ -68,7 +68,6 @@ def plot_SI0_population(city_A, city_B, save_prefix="fig"):
         ax.set_xticklabels(loc, fontsize=7, rotation=45, ha="right")
         ax.set_ylabel("Population ($\\times 10^3$)", fontsize=8)
         ax.set_xlabel("Location", fontsize=8)
-        ax.set_title(title, fontsize=9, pad=4)
         ax.axhline(float(pops.mean()) / 1e3, color="0.5", lw=0.9, ls="--")
         # Annotate total population
         ax.text(0.97, 0.97, f"Total = {pops.sum()/1e3:.0f}k",
@@ -105,7 +104,7 @@ def plot_SI1(sim, save_prefix="fig"):
       C  coefficient of variation of R^j_out over time
       D  ε_{kj} at the early day
       E  ε_{kj} at the epidemic peak
-      F  Σ_j ε_{kj} at the peak (infector elasticity, Eq 34)
+      F  location elasticity ε^k = Σ_j ε_{kj} at the peak
     """
     inc    = sim["incidence"]
     R_mats = sim["R_matrices"]
@@ -115,12 +114,12 @@ def plot_SI1(sim, save_prefix="fig"):
     loc    = [f"L{i+1}" for i in range(N)]
 
     fig = plt.figure(figsize=(7.2, 4.8))
-    gs  = gridspec.GridSpec(2, 3, hspace=0.85, wspace=0.55,
+    gs  = gridspec.GridSpec(2, 3, hspace=0.55, wspace=0.55,
                             left=0.08, right=0.97, top=0.97, bottom=0.08)
 
     # ── A/B: sensitivity matrices at early and peak ────────────────────────
-    for ci, (day, dlbl) in enumerate([(early, f"early (day {early})"),
-                                       (peak,  f"peak (day {peak})")]):
+    # (the early and peak days are stated in the caption, not on the figure)
+    for ci, day in enumerate((early, peak)):
         se = sensitivity_elasticity(R_mats[day])
         ax = fig.add_subplot(gs[0, ci])
         im = ax.imshow(se["sensitivity"], cmap="Blues", aspect="auto")
@@ -128,9 +127,7 @@ def plot_SI1(sim, save_prefix="fig"):
         ax.set_yticks(range(N)); ax.set_yticklabels(loc, fontsize=5)
         ax.set_xlabel("Infectee $j$"); ax.set_ylabel("Infector $k$")
         cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cb.ax.set_title(dlbl, fontsize=5, pad=3)
-        ax.set_title(f"Sensitivity $S_{{kj}} = \\partial\\mathcal{{R}}/\\partial R_{{kj}}$",
-                     fontsize=6, pad=3)
+        cb.ax.set_title("$s^{kj}$", fontsize=6, pad=3)
         _panel_label(ax, ["A", "B"][ci])
 
     # ── C: CV of outward R over time ───────────────────────────────────────
@@ -139,12 +136,10 @@ def plot_SI1(sim, save_prefix="fig"):
     vc    = cv_ts > 0
     ax.plot(np.where(vc)[0], cv_ts[vc], color=OKABE_ITO[2], lw=1.2)
     ax.set_xlabel("Day $t$"); ax.set_ylabel("CV of $R^j_{\\rm out}$")
-    ax.set_title("Heterogeneity in\noutward $R$", fontsize=6, pad=3)
     _panel_label(ax, "C")
 
     # ── D/E: elasticity matrices at early and peak ─────────────────────────
-    for ci, (day, dlbl) in enumerate([(early, f"early (day {early})"),
-                                       (peak,  f"peak (day {peak})")]):
+    for ci, day in enumerate((early, peak)):
         se = sensitivity_elasticity(R_mats[day])
         ax = fig.add_subplot(gs[1, ci])
         im = ax.imshow(se["elasticity"], cmap="Purples", aspect="auto")
@@ -152,22 +147,17 @@ def plot_SI1(sim, save_prefix="fig"):
         ax.set_yticks(range(N)); ax.set_yticklabels(loc, fontsize=5)
         ax.set_xlabel("Infectee $j$"); ax.set_ylabel("Infector $k$")
         cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cb.ax.set_title(dlbl, fontsize=5, pad=3)
-        ax.set_title(f"Elasticity $\\varepsilon_{{kj}} = (R_{{kj}}/\\mathcal{{R}})\\,S_{{kj}}$",
-                     fontsize=6, pad=3)
+        cb.ax.set_title("$\\varepsilon^{kj}$", fontsize=6, pad=3)
         _panel_label(ax, ["D", "E"][ci])
 
-    # ── F: infector elasticity bar chart at peak ───────────────────────────
+    # ── F: location elasticity ε^k = Σ_j ε^{kj} (= Σ_j ε^{jk}) at the peak ────
     ax = fig.add_subplot(gs[1, 2])
     se_peak = sensitivity_elasticity(R_mats[peak])
     col_elas = se_peak["elasticity"].sum(axis=1)   # Σ_j ε_{kj}
     for k in range(N):
         ax.bar(k, col_elas[k], color=OKABE_ITO[k % len(OKABE_ITO)])
     ax.set_xticks(range(N)); ax.set_xticklabels(loc, rotation=45, fontsize=6)
-    ax.set_ylabel("$\\sum_j \\varepsilon_{kj}$")
-    ax.set_title("Elasticity\n(infector importance)", fontsize=6, pad=5)
-    ax.text(0.98, 0.98, f"peak (day {peak})", transform=ax.transAxes,
-            fontsize=5, ha="right", va="top", style="italic")
+    ax.set_ylabel("Location elasticity $\\varepsilon^k$")
     _panel_label(ax, "F")
 
     plt.savefig(f"{save_prefix}_SI1_sensitivity.pdf", dpi=300, bbox_inches="tight")
@@ -217,7 +207,7 @@ def plot_SI_epi_params(params, gen_time_pmf, max_days, sim, f_jk, populations,
     ax.fill_between(days, gen_time_pmf, alpha=0.15, color=OKABE_ITO[4])
     ax.set_xlabel("Infection age $a_E$ (days)")
     ax.set_ylabel("Probability")
-    ax.legend(fontsize=5.5, borderpad=0.3, labelspacing=0.2)
+    ax.legend(fontsize=5.5, borderpad=0.3, labelspacing=0.2, loc="upper right")
     _panel_label(ax, "A")
 
     # ── B: cumulative distribution ────────────────────────────────────────
@@ -276,8 +266,6 @@ def plot_SI_epi_params(params, gen_time_pmf, max_days, sim, f_jk, populations,
            alpha=0.85, edgecolor="none", width=0.7)
     ax.set_xticks(range(N)); ax.set_xticklabels(loc_labels, rotation=45, fontsize=6)
     ax.set_ylabel("$N^l_{\\rm eff}$ ($\\times 10^3$)")
-    ax.set_title(f"Effective population $N^l_{{\\rm eff}}$\nat peak (day {peak})",
-                 fontsize=6, pad=3)
     _panel_label(ax, "E")
 
     # ── F: calibrated rates at meeting location l ──────────────────────────
@@ -296,9 +284,6 @@ def plot_SI_epi_params(params, gen_time_pmf, max_days, sim, f_jk, populations,
            label="$p\\,\\lambda_B/N^l_{\\rm eff}$")
     ax.set_xticks(range(N)); ax.set_xticklabels(loc_labels, rotation=45, fontsize=6)
     ax.set_ylabel(f"Rate ($\\times 10^{{{exponent}}}$ per day)")
-    ax.set_title(f"Calibrated rates at meeting location $l$\n"
-                 f"($p$ = {pp}, $c_l = m_k = 1$; day {peak})",
-                 fontsize=6, pad=3)
     ax.legend(fontsize=5.5, borderpad=0.3)
     _panel_label(ax, "F")
 
@@ -398,7 +383,6 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
         ax.plot(inc / 1e3, color=col, lw=0.9, label=f"$\\tau={md}$ d")
     ax.set_xlabel("Day $t$")
     ax.set_ylabel("Total incidence ($\\times 10^3$)")
-    ax.set_title("(a) Profile truncation: total incidence", fontsize=7, pad=3)
     ax.legend(fontsize=6, borderpad=0.3, title="Max age $\\tau$", title_fontsize=5.5)
     _panel_label(ax, "A")
 
@@ -412,7 +396,6 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
                 label=f"$\\tau={md}$ d")
     ax.axhline(1.0, color="0.55", ls="--", lw=0.8)
     ax.set_xlabel("Day $t$"); ax.set_ylabel("$\\mathcal{R}(t)$")
-    ax.set_title("(b) Profile truncation: $\\mathcal{R}(t)$", fontsize=7, pad=3)
     ax.legend(fontsize=6, borderpad=0.3, title="Max age $\\tau$", title_fontsize=5.5)
     _panel_label(ax, "B")
 
@@ -427,8 +410,7 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
     ax.plot(s_rk4["incidence"].sum(axis=1) / 1e3,
             color=OKABE_ITO[2], lw=0.8, ls=":", label="RK4")
     ax.set_xlabel("Day $t$"); ax.set_ylabel("Incidence ($\\times 10^3$)")
-    ax.set_title("(c) Update rules for $S$ at $\\Delta t = 1$ d", fontsize=7, pad=3)
-    ax.legend(fontsize=6, borderpad=0.3)
+    ax.legend(fontsize=6, borderpad=0.3, loc="upper left")
     _panel_label(ax, "C")
 
     # ── D: closed-population balance ──────────────────────────────────────
@@ -438,7 +420,6 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
                 lw=0.7, alpha=0.75)
     ax.set_xlabel("Day $t$")
     ax.set_ylabel("$|S_{\\rm end}+I_{\\rm cum}-N|/N$ (floor $10^{-18}$)")
-    ax.set_title("(d) Closed-population balance", fontsize=7, pad=3)
     ax.set_yscale("log")
     ax.text(0.97, 0.97, "Each line = one location",
             transform=ax.transAxes, fontsize=5, ha="right", va="top", color="0.4")
@@ -458,7 +439,6 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
     ax.set_xlabel("Day $t$")
     ax.set_ylabel("$|I_j(t) - [\\mathbf{R}(t)^\\top\\Lambda(t)]_j/\\sum_{a\\geq1}p|$"
                   " / max$(I_j,1)$  (floor $10^{-18}$)", fontsize=6)
-    ax.set_title("(e) Renewal identity residual", fontsize=7, pad=3)
     ax.legend(fontsize=6, borderpad=0.3)
     _panel_label(ax, "E")
 
@@ -498,12 +478,9 @@ def plot_SI_pde_convergence(city_data, f_jk, base_f, params, initial_infections,
     ax.axvspan(fit_start, fit_end, alpha=0.07, color=OKABE_ITO[0])
     ax.set_xlabel("Day $t$")
     ax.set_ylabel("Total incidence (log scale)")
-    ax.set_title("(f) Early growth: PDE vs Euler–Lotka", fontsize=7, pad=3)
     ax.legend(fontsize=5.0, borderpad=0.3)
     _panel_label(ax, "F")
 
-    plt.suptitle("Numerical checks of the deterministic upwind solver",
-                 fontsize=9, y=0.97)
     plt.savefig(f"{save_prefix}_SI4_convergence.pdf", dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  Saved {save_prefix}_SI4_convergence.pdf")
@@ -602,8 +579,6 @@ def plot_SI_sensitivity(city_data, f_jk, base_f, params, initial_infections,
         ax.plot(s["incidence"].sum(axis=1) / 1e3, color=col, lw=0.9, label=lbl)
     ax.set_xlabel("Day $t$")
     ax.set_ylabel("Incidence ($\\times 10^3$)")
-    ax.set_title("Sensitivity to the infectiousness\nprofile $p(a_E)$",
-                 fontsize=6, pad=3)
     ax.text(0.03, 0.97,
             "Single $p(a_E)$ varied;\nmobility held constant.",
             transform=ax.transAxes, fontsize=4.5, va="top", color="0.4", style="italic")
@@ -644,7 +619,7 @@ def plot_SI_3d_earlypeak(sim_A, sim_B, save_prefix="fig"):
     for row, col, lbl, mat, title in panel_specs:
         ax = fig.add_subplot(gs[row, col], projection="3d")
         _bar3d_inc(ax, mat, title)
-        ax.text2D(-0.04, 1.12, lbl, transform=ax.transAxes,
+        ax.text2D(-0.04, 1.02, lbl, transform=ax.transAxes,
                   fontsize=10, fontweight="bold", va="top", ha="left")
 
     plt.savefig(f"{save_prefix}_SI8_3d_earlypeak.pdf", dpi=300, bbox_inches="tight")
@@ -686,7 +661,6 @@ def plot_SI5_combined(sim_A, sim_B, save_prefix="fig"):
         ax.set_xlabel("Day $t$"); ax.set_ylabel("Activity location $l$")
         cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cb.ax.set_title("$R^l_{\\rm meeting}$", fontsize=6, pad=3)
-        ax.set_title(name, fontsize=7.5, fontweight="bold", color=col_theme, pad=5)
         _panel_label(ax, lbl_heat)
 
         # Scatter panel
@@ -705,9 +679,6 @@ def plot_SI5_combined(sim_A, sim_B, save_prefix="fig"):
         ax.plot([0, vmax_v], [0, vmax_v], color="0.55", ls="--", lw=0.8)
         ax.set_xlabel("$R^j_{\\rm in}$  (residence-based)")
         ax.set_ylabel("$R^l_{\\rm meeting}$  (activity-based)")
-        ax.text(0.05, 0.97, f"{name} — peak (day {peak})",
-                transform=ax.transAxes, fontsize=5.5, va="top", style="italic",
-                color=col_theme)
         _panel_label(ax, lbl_scat)
 
     fname = f"{save_prefix}_SI5_meeting_combined.png"
@@ -796,7 +767,6 @@ def plot_SI_R_comparison(sim, city_data, R_independent, save_prefix="fig"):
         ax.set_yticklabels(loc_lbl, fontsize=5)
         ax.set_xlabel("Day $t$", fontsize=7)
         ax.set_ylabel(ylabel, fontsize=7)
-        ax.set_title(title, fontsize=6.5, pad=3)
         ax.axvline(peak, color="k", lw=0.7, ls="--", alpha=0.5)
         ax.text(peak + 0.5, 0.01, f"pk d{peak}",
                 fontsize=4.5, color="k", va="bottom",
@@ -863,7 +833,6 @@ def plot_SI_R_comparison(sim, city_data, R_independent, save_prefix="fig"):
     ax_f.set_xlabel(f"Mean relative difference (%) ± 1 s.d.\n"
                     f"({int(win.sum())} days: $\\rho>{RHO_FLOOR}$, all $\\hat{{R}}^j$ defined)",
                     fontsize=6)
-    ax_f.set_title("Per-location mean relative difference", fontsize=6.5, pad=3)
     ax_f.legend(fontsize=5.5, borderpad=0.3, loc="lower right")
     _panel_label(ax_f, "F")
 
@@ -906,14 +875,10 @@ def plot_SI_R_comparison(sim, city_data, R_independent, save_prefix="fig"):
 
     ax_g = fig.add_subplot(gs[2, 0])
     _ts_panel(ax_g, R_out_tm, f"$\\bar{{R}}^j_{{\\rm out}}$ ({ESTIMATOR_WINDOW}-day mean)", "$R(t)$")
-    ax_g.set_title("$\\bar{R}^j_{\\rm out}$ vs $\\hat{R}^j_{\\mathrm{ind}}$",
-                   fontsize=6.5, pad=3)
     _panel_label(ax_g, "G")
 
     ax_h = fig.add_subplot(gs[2, 1])
     _ts_panel(ax_h, R_in_tm, f"$\\bar{{R}}^j_{{\\rm in}}$ ({ESTIMATOR_WINDOW}-day mean)", "$R(t)$")
-    ax_h.set_title("$\\bar{R}^j_{\\rm in}$ vs $\\hat{R}^j_{\\mathrm{ind}}$",
-                   fontsize=6.5, pad=3)
     _panel_label(ax_h, "H")
 
     # ── I: scatter R̂^j_ind against R̄^j_in, coloured by phase ──────────────
@@ -952,9 +917,6 @@ def plot_SI_R_comparison(sim, city_data, R_independent, save_prefix="fig"):
     cbar_ph.ax.tick_params(labelsize=4.5)
     ax_i.set_xlabel(f"$\\bar{{R}}^j_{{\\rm in}}(t)$ ({ESTIMATOR_WINDOW}-day mean)", fontsize=7)
     ax_i.set_ylabel("$\\hat{R}^j_{\\mathrm{ind}}(t)$", fontsize=7)
-    ax_i.set_title("$\\hat{R}^j_{\\mathrm{ind}}$ vs $\\bar{R}^j_{\\rm in}$\n"
-                   "(all locations × days, coloured by phase)",
-                   fontsize=6.5, pad=3)
     ax_i.set_xlim(0, lim_x)
     ax_i.set_ylim(0, lim_y)
     ax_i.legend(fontsize=5.5, borderpad=0.3, loc="upper left")

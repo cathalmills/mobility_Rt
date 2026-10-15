@@ -43,10 +43,13 @@ def _set_pub_style():
     })
 
 
-def _panel_label(ax, letter, x=-0.14, y=1.04):
-    """Add bold panel letter (a, b, c …) in top-left corner of axes."""
+def _panel_label(ax, letter, x=-0.14, y=1.03):
+    """Bold panel letter (a, b, c …) just above the top-left corner of the axes.
+
+    The letter's baseline sits above the axes frame, so it never covers the top tick
+    label; figures carry no titles, so nothing else occupies that space."""
     ax.text(x, y, letter, transform=ax.transAxes,
-            fontsize=10, fontweight="bold", va="top", ha="left")
+            fontsize=10, fontweight="bold", va="bottom", ha="left")
 
 
 def _panel_label_3d(ax, letter):
@@ -55,8 +58,11 @@ def _panel_label_3d(ax, letter):
               fontsize=10, fontweight="bold", va="top", ha="left")
 
 
-def _bar3d_Rkj(ax, R_mat, day_label):
-    """3D bar chart of pairwise R_kj matrix. Infectors on x-axis, infectees on y-axis."""
+def _bar3d_Rkj(ax, R_mat, day_label=None):
+    """3D bar chart of pairwise R_kj matrix. Infectors on x-axis, infectees on y-axis.
+
+    day_label is accepted for backward compatibility and not drawn: figures carry no
+    panel titles, so the day belongs in the caption."""
     N = R_mat.shape[0]
     xpos = np.repeat(np.arange(N), N)   # infector k
     ypos = np.tile(np.arange(N), N)     # infectee j
@@ -80,11 +86,13 @@ def _bar3d_Rkj(ax, R_mat, day_label):
     ax.zaxis.set_tick_params(labelsize=5, pad=0)
     ax.view_init(elev=28, azim=-55)
     ax.tick_params(axis='z', labelsize=5, pad=0)
-    ax.set_title(f"$R_{{kj}}$ — {day_label}", fontsize=7, pad=18, fontweight="bold")
+    ax.set_zlabel("$R^{kj}$", fontsize=6, labelpad=2)
 
 
-def _bar3d_inc(ax, inc_mat, day_label):
-    """3D bar chart of pairwise new infections E_{kj}. Infectors on x-axis, infectees on y-axis."""
+def _bar3d_inc(ax, inc_mat, day_label=None):
+    """3D bar chart of pairwise new infections E_{kj}. Infectors on x-axis, infectees on y-axis.
+
+    day_label is accepted for backward compatibility and not drawn (see _bar3d_Rkj)."""
     N = inc_mat.shape[0]
     xpos = np.repeat(np.arange(N), N)
     ypos = np.tile(np.arange(N), N)
@@ -107,4 +115,4 @@ def _bar3d_inc(ax, inc_mat, day_label):
     ax.zaxis.set_tick_params(labelsize=5, pad=0)
     ax.view_init(elev=28, azim=-55)
     ax.tick_params(axis='z', labelsize=5, pad=0)
-    ax.set_title(f"$E_{{kj}}$ — {day_label}", fontsize=7, pad=18, fontweight="bold")
+    ax.set_zlabel("$E^{kj}$", fontsize=6, labelpad=2)

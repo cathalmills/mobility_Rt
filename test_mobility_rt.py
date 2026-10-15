@@ -2686,6 +2686,81 @@ class TestFigureFixes(unittest.TestCase):
                 np.testing.assert_allclose(solid[lbl].get_ydata(),
                                            trailing_mean(ser[:, j], 7)[x], rtol=1e-12)
 
+    def test_location_elasticity_series(self):
+        """ε^j is both the infector sum and the infectee sum of ε^{kj}, the location
+        elasticities sum to one, and the within-location share is Σ_j ε^{jj}."""
+        from mobility_rt.plotting.figures_corrected import location_elasticity_series
+        R_mats = self.sim["R_matrices"]
+        eps, within = location_elasticity_series(R_mats)
+        for t in (1, len(R_mats) // 2, len(R_mats) - 1):
+            E = sensitivity_elasticity(R_mats[t])["elasticity"]
+            np.testing.assert_allclose(eps[t], E.sum(axis=1), atol=1e-12)
+            np.testing.assert_allclose(eps[t], E.sum(axis=0), atol=1e-12)
+            self.assertAlmostEqual(within[t], float(np.trace(E)), places=12)
+        np.testing.assert_allclose(eps.sum(axis=1), 1.0, atol=1e-9)
+        self.assertTrue(np.all((within >= 0.0) & (within <= 1.0 + 1e-12)))
+
+    def test_fig2_I_and_fig3_D_draw_the_location_elasticity_panels(self):
+        """Fig 2 I is the within-location share (one line, two stacked areas on
+        [0, 1]); Fig 3 D plots each location's time-averaged ε^j against its
+        time-averaged R^j_out."""
+        from mobility_rt.plotting.figures_corrected import (location_elasticity_series,
+                                                            plot_fig02_overview,
+                                                            plot_fig03_taxonomy)
+        R_mats = self.sim["R_matrices"]
+        eps, within = location_elasticity_series(R_mats)
+
+        fig2 = self._capture(plot_fig02_overview, self.sim, self.city, self.f, self.p,
+                             len(self.p), "unused")[-1]
+        ax_i = self._axis_with_label(fig2, "I")
+        np.testing.assert_allclose(ax_i.get_lines()[0].get_ydata(), within, atol=1e-12)
+        self.assertEqual(len(ax_i.collections), 2)      # within and between areas
+        self.assertEqual(ax_i.get_ylim(), (0.0, 1.0))
+
+        fig3 = self._capture(plot_fig03_taxonomy, self.sim, self.city, self.R_ind,
+                             self.snaps, self.p, "unused")[-1]
+        ax_d = self._axis_with_label(fig3, "D")
+        R_out = np.array([R_outward(R) for R in R_mats])
+        np.testing.assert_allclose(ax_d.collections[0].get_offsets(),
+                                   np.column_stack([R_out.mean(axis=0), eps.mean(axis=0)]),
+                                   atol=1e-12)
+
+    def test_no_static_figure_carries_a_title(self):
+        """Every figure follows one convention: panel letters, axis labels, legends
+        and colourbar labels only; what a title would say goes in the caption.
+        Colourbar labels drawn with cb.ax.set_title are the one permitted use."""
+        import ast
+        import os
+        import mobility_rt.plotting as _pk
+        root = os.path.dirname(_pk.__file__)
+        for name in ("figures_corrected.py", "figures_main.py", "figures_si.py",
+                     "figures_tables.py", "style.py"):
+            tree = ast.parse(open(os.path.join(root, name)).read())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("set_title", "suptitle")):
+                    receiver = ast.unparse(node.func.value)
+                    self.assertTrue(receiver.endswith(".ax"),
+                                    f"{name}:{node.lineno}: {receiver}.{node.func.attr}(...)")
+
+    def test_rendered_main_figures_have_no_titles(self):
+        """The same, checked on the drawn Figs 2, 3 and 5 rather than on the source."""
+        from mobility_rt.plotting.figures_corrected import (plot_fig02_overview,
+                                                            plot_fig03_taxonomy,
+                                                            plot_fig04_spectral)
+        figs = (self._capture(plot_fig02_overview, self.sim, self.city, self.f, self.p,
+                              len(self.p), "unused")
+                + self._capture(plot_fig03_taxonomy, self.sim, self.city, self.R_ind,
+                                self.snaps, self.p, "unused")
+                + self._capture(plot_fig04_spectral, self.sim, "unused"))
+        for fig in figs:
+            self.assertIsNone(fig._suptitle)
+            for ax in fig.axes:
+                if ax.get_label() == "<colorbar>" or hasattr(ax, "_colorbar"):
+                    continue
+                for loc in ("left", "center", "right"):
+                    self.assertEqual(ax.get_title(loc=loc), "")
+
     def test_fig3_K_keeps_undefined_T_j_as_nan(self):
         """Undefined T_j reaches the tile and the surface as NaN, not 0."""
         from unittest import mock
